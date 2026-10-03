@@ -186,6 +186,30 @@ def _bboxes_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) 
     return _rect_intersects(a, b)
 
 
+def _iou_cached(
+    a: tuple[tuple[int, int, int, int], np.ndarray, int],
+    b: tuple[tuple[int, int, int, int], np.ndarray, int],
+) -> float:
+    """IoU from bbox-local boolean masks; identical to _polygon_iou modulo the
+    dropped >4096 px region clamp."""
+    (ax0, ay0, ax1, ay1), mask_a, area_a = a
+    (bx0, by0, bx1, by1), mask_b, area_b = b
+    ox0, oy0 = max(ax0, bx0), max(ay0, by0)
+    ox1, oy1 = min(ax1, bx1), min(ay1, by1)
+    if ox1 <= ox0 or oy1 <= oy0:
+        return 0.0
+    inter = int(
+        (
+            mask_a[oy0 - ay0 : oy1 - ay0, ox0 - ax0 : ox1 - ax0]
+            & mask_b[oy0 - by0 : oy1 - by0, ox0 - bx0 : ox1 - bx0]
+        ).sum()
+    )
+    union = area_a + area_b - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
+
+
 def _dedup_instances(
     instances: list[dict[str, Any]], iou_threshold: float
 ) -> tuple[list[dict[str, Any]], int]:
@@ -201,8 +225,22 @@ def _dedup_instances(
     cell_px = 512
     buckets: dict[tuple[int, int], list[int]] = defaultdict(list)
     kept: list[dict[str, Any]] = []
+    kept_order: list[int] = []
     merged = 0
-    for inst in ordered:
+    mask_cache: dict[int, tuple[tuple[int, int, int, int], np.ndarray, int]] = {}
+
+    def _mask_entry(
+        order_idx: int,
+    ) -> tuple[tuple[int, int, int, int], np.ndarray, int]:
+        entry = mask_cache.get(order_idx)
+        if entry is None:
+            box = _bbox_int(ordered[order_idx])
+            mask = _rasterize(ordered[order_idx], box)
+            entry = (box, mask, int(mask.sum()))
+            mask_cache[order_idx] = entry
+        return entry
+
+    for order_idx, inst in enumerate(ordered):
         bbox = _bbox_int(inst)
         cx0, cy0 = bbox[0] // cell_px, bbox[1] // cell_px
         cx1, cy1 = bbox[2] // cell_px, bbox[3] // cell_px
@@ -211,9 +249,16 @@ def _dedup_instances(
             for cx in range(cx0, cx1 + 1):
                 for kept_idx in buckets[(cy, cx)]:
                     other = kept[kept_idx]
-                    if not _bboxes_overlap(bbox, _bbox_int(other)):
+                    other_box = mask_cache.get(kept_order[kept_idx], (_bbox_int(other),))[0]
+                    if not _bboxes_overlap(bbox, other_box):
                         continue
-                    if _polygon_iou(inst, other) > iou_threshold:
+                    if (
+                        _iou_cached(
+                            _mask_entry(order_idx),
+                            _mask_entry(kept_order[kept_idx]),
+                        )
+                        > iou_threshold
+                    ):
                         duplicate_of = other
                         break
                 if duplicate_of is not None:
@@ -234,6 +279,7 @@ def _dedup_instances(
             continue
         inst.setdefault("duplicates", [])
         kept.append(inst)
+        kept_order.append(order_idx)
         for cy in range(cy0, cy1 + 1):
             for cx in range(cx0, cx1 + 1):
                 buckets[(cy, cx)].append(len(kept) - 1)

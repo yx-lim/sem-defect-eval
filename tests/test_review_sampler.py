@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from pathlib import Path
 
@@ -11,7 +12,13 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from sem.qc.review.sampler import build_review_set
+from sem.qc.review.sampler import (
+    _bbox_int,
+    _iou_cached,
+    _polygon_iou,
+    _rasterize,
+    build_review_set,
+)
 from sem.qc.schema import read_jsonl
 from conftest import (
     CLASSES,
@@ -537,3 +544,45 @@ def test_no_blank_when_zero(synthetic):
     items = _items(synthetic)
     tiles = [i for i in items if i["kind"] == "exhaustive_tile"]
     assert all(i["prefill"] == "classical_v1" for i in tiles)
+
+
+def test_cached_iou_matches_polygon_iou():
+    import random
+
+    rng = random.Random(1234)
+    pairs = []
+    for _ in range(30):
+        pts_a = [
+            (rng.uniform(0, 200), rng.uniform(0, 200)) for _ in range(rng.randint(3, 8))
+        ]
+        # hull-sort around centroid so the polygon is simple
+        cx = sum(p[0] for p in pts_a) / len(pts_a)
+        cy = sum(p[1] for p in pts_a) / len(pts_a)
+        pts_a.sort(key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
+        shift = rng.uniform(0, 150)
+        pts_b = [(x + shift, y + rng.uniform(-40, 40)) for x, y in pts_a]
+        pairs.append((pts_a, pts_b))
+    # off-by-fraction coordinates
+    pairs.append(
+        (
+            [(10.4, 10.9), (50.999, 10.1), (50.5, 60.7), (10.2, 60.3)],
+            [(20.3, 15.6), (60.999, 14.9), (59.4, 70.1), (19.8, 69.999)],
+        )
+    )
+
+    def _inst(pts):
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        return {
+            "bbox": [min(xs), min(ys), max(xs), max(ys)],
+            "polygon": [[float(x), float(y)] for x, y in pts],
+        }
+
+    for pts_a, pts_b in pairs:
+        a, b = _inst(pts_a), _inst(pts_b)
+        expected = _polygon_iou(a, b)
+        entry_a = (_bbox_int(a), _rasterize(a, _bbox_int(a)), 0)
+        entry_b = (_bbox_int(b), _rasterize(b, _bbox_int(b)), 0)
+        entry_a = (entry_a[0], entry_a[1], int(entry_a[1].sum()))
+        entry_b = (entry_b[0], entry_b[1], int(entry_b[1].sum()))
+        assert _iou_cached(entry_a, entry_b) == pytest.approx(expected)
