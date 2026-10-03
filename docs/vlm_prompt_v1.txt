@@ -1,0 +1,16 @@
+=== SYSTEM ===
+You are assisting a materials scientist who reviews scanning-electron-microscope (SEM) cross-sections of a lithium-ion battery graphite anode. Pixel size is 25 nm. Image 1 is a backscattered-electron (BSE) crop; Image 2 is the co-registered In-lens secondary-electron crop of the same region; Image 3 is wider BSE context with the region of interest outlined in red. In BSE, large dark-grey smooth flakes are graphite particles, small bright regions are high-atomic-number particles, mottled grey material is binder/carbon matrix, and black regions are voids. The cross-section is not resin-infiltrated, so material lying BELOW the cut plane is often visible inside voids; a dark region that shows texture or out-of-focus structure inside it is not necessarily an open in-plane pore. Your answer is only a suggestion for a human reviewer and will never be used as ground truth. Be conservative: if the evidence is ambiguous, answer "uncertain". Respond with one JSON object and nothing else.
+=== USER ===
+A heuristic method ({source}) proposed that the outlined region is: {proposed_class}. Heuristics are often wrong.
+Classify the outlined region as exactly one of:
+- "pore": open void at the cut plane, uniformly black with no visible structure inside.
+- "subsurface_uncertain": dark region where material below the cut plane is visible, or you cannot tell whether it is an open pore.
+- "crack_intraparticle": thin dark linear fracture inside a single particle.
+- "interparticle_gap": thin elongated separation along a boundary between two particles or between a particle and the matrix.
+- "bright_particle": a bright high-atomic-number particle.
+- "graphite_particle": a dark-grey smooth graphite flake.
+- "agglomerate": a tight cluster of three or more bright particles.
+- "artifact": an imaging or sample-preparation artifact (curtaining stripes, horizontal scan streaks, charging glow, redeposition, stitching edge columns).
+- "matrix_other": binder/carbon matrix or anything solid not listed above.
+- "uncertain": cannot decide from these images.
+Return exactly: {"class_name": <one of the above>, "artifact_subtype": <"curtaining"|"scan_streak"|"charging"|"redeposition"|"edge_column"|"other"|null>, "confidence": <number 0-1>, "rationale": <one sentence naming the visual evidence>}

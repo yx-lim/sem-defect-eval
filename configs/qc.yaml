@@ -1,0 +1,62 @@
+paths:
+  data_root: "${SEM_DATA_ROOT:-/home/ubuntu/data/sem}"
+  work_root: "${SEM_WORK_ROOT:-/home/ubuntu/work/qc}"
+  groups_override: "configs/groups_override.yaml"
+
+pixel_size_nm:
+  min: 24.9
+  max: 25.1
+
+valid_mask:
+  color_dilation_radius_px: 2
+  border_px: 8
+
+classes:
+  0: matrix_other
+  1: graphite_particle
+  2: bright_particle
+  3: pore
+  4: subsurface_uncertain
+  5: crack_intraparticle
+  6: interparticle_gap
+  7: artifact
+  255: ignore
+
+tile_sizes:
+  exhaustive_review_px: 512
+  drift_px: 1024
+  similarity_scale: 0.25
+
+seeds:
+  split: 20261003
+  bootstrap: 0
+  permutation: 0
+
+evaluation:
+  bootstrap_replicates: 2000
+  permutation_replicates: 10000
+
+classical_v1:
+  gaussian_sigma: 1.0
+  multi_otsu_classes: 4
+  bright_min_area_px: 16
+  bright_opening_radius_px: 1
+  local_std_window_px: 7
+  pore_local_std_max: 8.0
+  graphite_local_std_max: 12.0
+  black_tophat_radius_px: 5
+  black_tophat_threshold: 8.0
+  thin_component_min_skeleton_px: 30
+  thin_component_min_aspect_ratio: 4.0
+  crack_enclosure_radius_px: 4
+  agglomerate_min_particles: 3
+  agglomerate_link_distance_px: 10
+  scan_streak_highpass_sigma: 1.0
+  scan_streak_z_threshold: 3.0
+  uncertainty_otsu_margin: 16.0
+  uncertainty_local_std_margin: 4.0
+
+split:
+  test_fraction: 0.2
+  val_fraction: 0.2
+  frozen_manifest_sha256: be8b7db697a38a53cbb34f76bdcd336810f8c17bcc4b445efd96e783ae8ab8b3
