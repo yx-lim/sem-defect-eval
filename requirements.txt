@@ -8,3 +8,8 @@ pillow==10.2.0
 pyyaml==6.0.1
 pandas==2.2.1
 pytest==8.1.1
+fastapi==0.142.2
+uvicorn==0.54.0
+httpx==0.28.1
+anthropic==1.11.0
+gdown==6.4.1
