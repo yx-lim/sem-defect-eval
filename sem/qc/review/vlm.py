@@ -83,7 +83,9 @@ def _model_ids(client: Any) -> set[str]:
     page = client.models.list()
     while True:
         ids.update(model.id for model in page.data)
-        if not getattr(page, "has_next_page", False):
+        hnp = getattr(page, "has_next_page", None)
+        more = hnp() if callable(hnp) else bool(hnp)
+        if not more:
             return ids
         page = page.get_next_page()
 
