@@ -220,3 +220,35 @@ def test_max_tokens_retry(prompt_file, tmp_path):
     )
     assert stats["ok"] == 1
     assert client.messages.calls[1]["max_tokens"] == 4000
+
+
+class _Page:
+    def __init__(self, ids, more):
+        self.data = [type("M", (), {"id": i})() for i in ids]
+        self._more = more
+        self.next_page = None
+
+    def has_next_page(self):
+        return self._more
+
+    def get_next_page(self):
+        if self.next_page is None:
+            raise RuntimeError("no next page")
+        return self.next_page
+
+
+def test_model_ids_single_page():
+    client = type("C", (), {})()
+    client.models = type("M", (), {})()
+    client.models.list = lambda: _Page(["claude-opus-5-5"], False)
+    assert vlm._model_ids(client) == {"claude-opus-5-5"}
+
+
+def test_model_ids_two_pages():
+    page2 = _Page(["claude-opus-5-5"], False)
+    page1 = _Page(["claude-sonnet-5-5"], True)
+    page1.next_page = page2
+    client = type("C", (), {})()
+    client.models = type("M", (), {})()
+    client.models.list = lambda: page1
+    assert vlm._model_ids(client) == {"claude-sonnet-5-5", "claude-opus-5-5"}

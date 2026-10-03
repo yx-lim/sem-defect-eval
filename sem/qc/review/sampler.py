@@ -260,19 +260,36 @@ def _instance_uncertainty(
 
 
 def _candidate_tile(
-    instance: dict[str, Any], height: int, width: int, min_context_px: int
-) -> dict[str, int]:
+    instance: dict[str, Any],
+    height: int,
+    width: int,
+    min_context_px: int,
+    max_tile_px: int = 1024,
+) -> dict[str, Any]:
     bx0, by0, bx1, by1 = [float(v) for v in instance["bbox"]]
     bw, bh = bx1 - bx0, by1 - by0
-    pad = max(16.0, 0.25 * max(bw, bh))
-    w = min(width, max(min_context_px, int(math.ceil(bw + 2 * pad))))
-    h = min(height, max(min_context_px, int(math.ceil(bh + 2 * pad))))
+    pad_x = max(16.0, 0.25 * bw)
+    pad_y = max(16.0, 0.25 * bh)
+    w = min(
+        width,
+        min(max_tile_px, max(min_context_px, int(math.ceil(bw + 2 * pad_x)))),
+    )
+    h = min(
+        height,
+        min(max_tile_px, max(min_context_px, int(math.ceil(bh + 2 * pad_y)))),
+    )
     cx, cy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
     x0 = int(round(cx - w / 2.0))
     y0 = int(round(cy - h / 2.0))
     x0 = min(max(0, x0), width - w)
     y0 = min(max(0, y0), height - h)
-    return {"x0": x0, "y0": y0, "w": w, "h": h}
+    return {
+        "x0": x0,
+        "y0": y0,
+        "w": w,
+        "h": h,
+        "truncated": bw > w or bh > h,
+    }
 
 
 def build_review_set(
@@ -320,6 +337,7 @@ def build_review_set(
     candidate_classes = set(review_config["candidate_classes"])
     dedup_iou = float(review_config["dedup_iou"])
     min_context_px = int(review_config["candidate_min_context_px"])
+    max_tile_px = int(review_config.get("candidate_max_tile_px", 1024))
 
     manifest = load_manifest(manifest_path, manifest_sha256)
     methods = list_methods(preds_root)
@@ -489,19 +507,29 @@ def build_review_set(
 
     # candidate item_ids (depend only on stem/source/tile)
     id_collisions = 0
-    seen_ids: set[str] = set()
+    seen_ids: dict[str, dict[str, Any]] = {}
     final_pool: list[dict[str, Any]] = []
     for inst in deduped:
         height, width = stem_sizes[inst["stem"]]
-        tile = _candidate_tile(inst, height, width, min_context_px)
+        tile = _candidate_tile(inst, height, width, min_context_px, max_tile_px)
         item_id = make_item_id(
             inst["stem"], "candidate", tile["x0"], tile["y0"], tile["w"], tile["h"],
             inst["source"],
         )
         if item_id in seen_ids:
             id_collisions += 1
+            seen_ids[item_id].setdefault("duplicates", []).append(
+                {
+                    "source": inst.get("source"),
+                    "class_name": inst.get("class_name"),
+                    "subtype": inst.get("subtype"),
+                    "score": inst.get("score"),
+                    "bbox": inst.get("bbox"),
+                    "reason": "same_review_tile",
+                }
+            )
             continue
-        seen_ids.add(item_id)
+        seen_ids[item_id] = inst
         inst["item_id"] = item_id
         inst["tile"] = tile
         final_pool.append(inst)
@@ -719,7 +747,8 @@ def build_review_set(
         },
         "candidates": {
             "pool_before_dedup": pool_size_before,
-            "pool_after_dedup": len(final_pool),
+            "pool_after_dedup": len(deduped),
+            "pool_final": len(final_pool),
             "duplicates_merged": merged_total,
             "strata": candidate_strata_stats,
             "per_class": per_class,

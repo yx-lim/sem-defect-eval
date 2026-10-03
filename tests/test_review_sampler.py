@@ -270,3 +270,84 @@ def test_frozen_manifest_hash_mismatch(synthetic):
             review_config=synthetic["config"],
             manifest_sha256="0" * 64,
         )
+
+
+def test_candidate_tile_scan_streak():
+    from sem.qc.review.sampler import _candidate_tile
+
+    inst = {"bbox": [0, 136, 7000, 137]}
+    tile = _candidate_tile(inst, 2080, 7000, 128, 1024)
+    assert tile["w"] == 1024
+    assert tile["h"] == 128
+    assert tile["x0"] + tile["w"] / 2 == pytest.approx(3500)
+    assert tile["x0"] == 2988
+    assert tile["y0"] <= 136 and tile["y0"] + tile["h"] >= 137
+    assert tile["truncated"] is True
+
+
+def test_candidate_tile_small_blob():
+    from sem.qc.review.sampler import _candidate_tile
+
+    tile = _candidate_tile({"bbox": [100, 100, 110, 110]}, 2080, 7000, 128, 1024)
+    assert tile["w"] == 128 and tile["h"] == 128
+    assert tile["truncated"] is False
+
+
+def _streak_instance(y, source="classical_v1"):
+    return {
+        "class_name": "artifact",
+        "subtype": "scan_streak",
+        "bbox": [0, y, 7000, y + 1],
+        "polygon": [],
+        "score": 0.5,
+        "source": source,
+    }
+
+
+def test_distinct_streaks_get_distinct_tiles(tmp_path):
+    from sem.qc.review.sampler import _candidate_tile
+
+    t1 = _candidate_tile(_streak_instance(136), 2080, 7000, 128, 1024)
+    t2 = _candidate_tile(_streak_instance(600), 2080, 7000, 128, 1024)
+    assert (t1["x0"], t1["y0"], t1["w"], t1["h"]) != (
+        t2["x0"], t2["y0"], t2["w"], t2["h"]
+    )
+
+
+def test_same_tile_collision_merged_not_dropped(tmp_path):
+    # two instances whose bboxes produce the identical tile -> one item,
+    # the second recorded under duplicates with reason same_review_tile
+    import json as _json
+    from conftest import write_manifest, write_method_preds, REVIEW_CONFIG
+    from sem.qc.review.sampler import build_review_set, _dedup_instances
+    from sem.qc.schema import make_item_id
+
+    stems = [("a", "Batch_1", "val"), ("b", "Batch_1", "test")]
+    manifest = write_manifest(tmp_path / "manifest.csv", stems=stems)
+    preds = tmp_path / "preds"
+    write_method_preds(preds, "classical_v1", stems, method_idx=0)
+    inst_path = preds / "classical_v1" / "a_instances.json"
+    # same bbox -> identical tile & item_id, but disjoint polygons -> IoU 0,
+    # so dedup keeps both and the item_id collision path fires
+    i1 = {"class_name": "pore", "subtype": None,
+          "bbox": [500, 500, 620, 615],
+          "polygon": [[500, 500], [510, 500], [505, 510]],
+          "score": 0.9, "source": "classical_v1"}
+    i2 = {"class_name": "pore", "subtype": None,
+          "bbox": [500, 500, 620, 615],
+          "polygon": [[610, 605], [620, 605], [615, 615]],
+          "score": 0.8, "source": "classical_v1"}
+    inst_path.write_text(_json.dumps([i1, i2]))
+    inst_path = preds / "classical_v1" / "b_instances.json"
+    inst_path.write_text(_json.dumps([]))
+    out = tmp_path / "review"
+    cfg = dict(REVIEW_CONFIG)
+    r = build_review_set(manifest, preds, out, cfg, manifest_sha256=_sha(manifest))
+    items = r["items"]
+    cand = [i for i in items if i["kind"] == "candidate"]
+    assert len(cand) == 1
+    dups = cand[0]["proposal"]["duplicates"]
+    assert any(d.get("reason") == "same_review_tile" for d in dups)
+    s = r["summary"]["candidates"]
+    assert s["pool_before_dedup"] == s["pool_final"] + s["duplicates_merged"] + s["id_collisions"]
+    assert s["id_collisions"] == 1

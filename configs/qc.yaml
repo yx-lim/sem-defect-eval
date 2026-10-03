@@ -74,6 +74,7 @@ review:
   candidate_classes: [pore, crack_intraparticle, interparticle_gap, agglomerate, artifact, bright_particle]
   dedup_iou: 0.5
   candidate_min_context_px: 128
+  candidate_max_tile_px: 1024
   context_scale: 3.0
   context_max_px: 512
   vlm:
