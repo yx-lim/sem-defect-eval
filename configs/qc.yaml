@@ -60,3 +60,30 @@ split:
   test_fraction: 0.2
   val_fraction: 0.2
   frozen_manifest_sha256: null
+
+drift:
+  reference_batch: Batch_1
+  incoming_batches: [Batch_2, Batch_3]
+  min_valid_frac: 0.9
+  alpha: 0.05
+  permutation_statistic: rank_sum  # rank_sum | median_diff (median_diff p is also reported)
+  mahalanobis_null_pct: 95.0
+  mahalanobis_majority_frac: 0.5
+  confound_spearman_abs_rho: 0.6
+  noise_gaussian_sigma: 1.0
+  scan_streak_highpass_sigma: 5.0
+  curtain_subtile_px: 512
+  curtain_band: 2
+  evidence_tiles: 3
+  negative_control_split: [4, 3]
+  positive_control:
+    shifts: [blur, brightness, voids, cracks]
+    seed: 0
+    blur_sigma: 1.5
+    brightness_delta: 0.10
+    void_fraction_delta: 0.02
+    void_axis_px: [15.0, 60.0]
+    dark_percentile: 1.0
+    cracks_per_mm2: 3000.0
+    crack_length_px: [80.0, 300.0]
+    crack_width_px: 2
