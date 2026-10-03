@@ -6,10 +6,10 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import random
 import subprocess
 import time
-from collections import Counter
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -19,8 +19,9 @@ from PIL import Image, ImageDraw
 from torch.nn import functional as F
 
 from sem.qc.config import load_config
-from sem.qc.io import list_stems, load_stem, valid_mask
+from sem.qc.io import load_stem, valid_mask
 from sem.qc.models.unet import build_unet, prepare_input
+from sem.qc.partial_data import list_complete_stems
 
 
 def segmentation_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -75,11 +76,28 @@ def _pseudo_target(
     return target
 
 
+def _ignored_fraction_breakdown(
+    semantic: np.ndarray,
+    uncertainty: np.ndarray,
+    valid: np.ndarray,
+    uncertainty_threshold: float,
+) -> dict[str, float]:
+    base_ignored = (~valid) | (semantic == 255)
+    uncertainty_ignored = (
+        (uncertainty / 255.0 > uncertainty_threshold) & ~base_ignored
+    )
+    return {
+        "invalid_or_classical_255": float(np.mean(base_ignored)),
+        "uncertainty_gt_threshold": float(np.mean(uncertainty_ignored)),
+        "total": float(np.mean(base_ignored | uncertainty_ignored)),
+    }
+
+
 def _load_stem_data(
     record,
     work_root: Path,
     uncertainty_threshold: float,
-) -> tuple[dict[str, np.ndarray], np.ndarray]:
+) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, float]]:
     from PIL import Image
 
     views = load_stem(record)
@@ -93,7 +111,41 @@ def _load_stem_data(
     if semantic.shape != valid.shape or uncertainty.shape != valid.shape:
         raise ValueError(f"Classical maps have wrong shape for {record.stem}")
     target = _pseudo_target(semantic, uncertainty, valid, uncertainty_threshold)
-    return views, target
+    ignored_fractions = _ignored_fraction_breakdown(
+        semantic, uncertainty, valid, uncertainty_threshold
+    )
+    return views, target, ignored_fractions
+
+
+def _precompute_class_coordinates(
+    target: np.ndarray,
+    rng: np.random.Generator,
+    max_per_class: int = 200_000,
+) -> dict[int, np.ndarray]:
+    height, width = target.shape
+    coordinates = {}
+    for class_id in np.unique(target[target != 255]):
+        linear = np.flatnonzero(target.ravel() == class_id)
+        if linear.size > max_per_class:
+            linear = rng.choice(linear, size=max_per_class, replace=False)
+        coordinates[int(class_id)] = np.column_stack(
+            (linear // width, linear % width)
+        ).astype(np.int32, copy=False)
+    return coordinates
+
+
+def _budget_aware_learning_rate(
+    base_learning_rate: float,
+    completed_iters: int,
+    planned_iters: int,
+    elapsed_s: float,
+    max_seconds: float,
+) -> float:
+    if max_seconds <= 0:
+        raise ValueError("max_seconds must be positive")
+    progress = max(completed_iters / max(1, planned_iters), elapsed_s / max_seconds)
+    progress = float(np.clip(progress, 0.0, 1.0))
+    return base_learning_rate * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
 def _sample_crop(
@@ -101,17 +153,20 @@ def _sample_crop(
     crop_size: int,
     rng: np.random.Generator,
     class_aware: bool,
+    class_coordinates: dict[int, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     views, target = item
     height, width = target.shape
     crop_h, crop_w = min(crop_size, height), min(crop_size, width)
-    classes = np.unique(target[target != 255])
+    if class_aware and class_coordinates is None:
+        class_coordinates = _precompute_class_coordinates(target, rng)
+    classes = tuple(class_coordinates or ())
     for _ in range(100):
         if class_aware and len(classes):
             class_id = int(rng.choice(classes))
-            yy, xx = np.nonzero(target == class_id)
-            index = int(rng.integers(len(yy)))
-            center_y, center_x = int(yy[index]), int(xx[index])
+            coordinates = class_coordinates[class_id]
+            index = int(rng.integers(len(coordinates)))
+            center_y, center_x = (int(value) for value in coordinates[index])
             y0 = int(np.clip(center_y - crop_h // 2, 0, height - crop_h))
             x0 = int(np.clip(center_x - crop_w // 2, 0, width - crop_w))
         else:
@@ -252,37 +307,82 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     torch.set_num_threads(8)
     rng = np.random.default_rng(seed)
     work_root = Path(config["paths"]["work_root"])
-    manifest = _read_manifest(Path(__file__).resolve().parents[1], config)
-    records = list_stems(config["paths"]["data_root"])
+    project_root = Path(__file__).resolve().parents[1]
+    manifest = _read_manifest(project_root, config)
+    manifest_path = project_root / "data" / "splits" / "manifest.csv"
+    records, _ = list_complete_stems(
+        config["paths"]["data_root"], work_root, manifest_path
+    )
     record_by_stem = {record.stem: record for record in records}
-    train_stems = sorted(stem for stem, split in manifest.items() if split == "train")
-    val_stems = sorted(stem for stem, split in manifest.items() if split == "val")
-    if not train_stems or not val_stems:
-        raise ValueError("The frozen manifest must contain train and val stems")
-    if set(train_stems + val_stems) & {
+    requested_train_stems = sorted(
+        stem for stem, split in manifest.items() if split == "train"
+    )
+    requested_val_stems = sorted(
+        stem for stem, split in manifest.items() if split == "val"
+    )
+    test_stems = {
         stem for stem, split in manifest.items() if split == "test"
-    }:
+    }
+    if set(requested_train_stems + requested_val_stems) & test_stems:
         raise AssertionError("Test stems cannot be used for training or selection")
-    unknown = (set(train_stems) | set(val_stems)) - set(record_by_stem)
-    if unknown:
-        raise ValueError(f"Manifest stems are not in the image inventory: {sorted(unknown)}")
+    classical_root = work_root / "preds" / "classical_v1"
+
+    def is_available(stem: str) -> bool:
+        return stem in record_by_stem and all(
+            (classical_root / f"{stem}_{suffix}.png").is_file()
+            for suffix in ("semantic", "uncertainty")
+        )
+
+    missing_train_stems = [
+        stem for stem in requested_train_stems if not is_available(stem)
+    ]
+    missing_val_stems = [
+        stem for stem in requested_val_stems if not is_available(stem)
+    ]
+    train_stems = [
+        stem for stem in requested_train_stems if stem not in missing_train_stems
+    ]
+    val_stems = [
+        stem for stem in requested_val_stems if stem not in missing_val_stems
+    ]
+    print(f"missing_train_stems={missing_train_stems}", flush=True)
+    print(f"missing_val_stems={missing_val_stems}", flush=True)
+    if not train_stems or not val_stems:
+        raise ValueError(
+            "Training requires at least one available train stem and one available val stem"
+        )
 
     threshold = float(training_config.get("ignore_if_classical_uncertainty_gt", 0.5))
     cache: dict[str, tuple[dict[str, np.ndarray], np.ndarray]] = {}
     for stem in train_stems + val_stems:
         record = record_by_stem[stem]
-        pair = _load_stem_data(record, work_root, threshold)
+        views, target, ignored_fractions = _load_stem_data(
+            record, work_root, threshold
+        )
+        pair = (views, target)
         cache[stem] = pair
-        histogram = Counter(int(label) for label in pair[1].ravel() if label != 255)
-        ignored_fraction = float(np.mean(pair[1] == 255))
+        histogram_counts = np.bincount(target[target != 255], minlength=8)[:8]
+        histogram = {
+            class_id: int(count)
+            for class_id, count in enumerate(histogram_counts)
+            if count
+        }
         print(
-            f"{stem}: ignored_fraction={ignored_fraction:.6f} "
+            f"{stem}: ignored_invalid_or_classical_255_fraction="
+            f"{ignored_fractions['invalid_or_classical_255']:.6f} "
+            f"ignored_uncertainty_gt_threshold_fraction="
+            f"{ignored_fractions['uncertainty_gt_threshold']:.6f} "
+            f"ignored_total_fraction={ignored_fractions['total']:.6f} "
             f"pseudo_label_class_histogram={dict(sorted(histogram.items()))}",
             flush=True,
         )
 
     crop_size = int(training_config.get("crop_size_px", 256))
     fixed_rng = np.random.default_rng(seed)
+    train_class_coordinates = {
+        stem: _precompute_class_coordinates(cache[stem][1], rng)
+        for stem in train_stems
+    }
     validation_crops = [
         _sample_crop(cache[str(fixed_rng.choice(val_stems))], 512, fixed_rng, False)
         for _ in range(64)
@@ -301,16 +401,19 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     max_epochs = int(training_config.get("max_epochs", 100))
     patience = int(training_config.get("early_stop_patience", 4))
     max_seconds = float(training_config.get("max_train_minutes", 100)) * 60.0
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(1, iters_per_epoch * max_epochs)
-    )
+    if max_seconds <= 0:
+        raise ValueError("max_train_minutes must be positive")
+    base_learning_rate = float(training_config.get("learning_rate", 1e-3))
+    planned_iters = max(1, iters_per_epoch * max_epochs)
     output_dir = Path(args.out)
     output_dir.mkdir(parents=True, exist_ok=True)
     best_miou = -1.0
     best_epoch = 0
     stale_epochs = 0
+    best_epoch_pixel_agreement = 0.0
     epochs: list[dict[str, object]] = []
     started = time.monotonic()
+    total_iters_done = 0
     stop_reason = "max_epochs"
     for epoch in range(1, max_epochs + 1):
         if time.monotonic() - started >= max_seconds:
@@ -319,15 +422,34 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         model.train()
         epoch_loss = 0.0
         steps = 0
+        epoch_lrs = []
+        epoch_started = time.monotonic()
         for _ in range(iters_per_epoch):
-            if time.monotonic() - started >= max_seconds:
+            elapsed = time.monotonic() - started
+            if elapsed >= max_seconds:
                 stop_reason = "max_train_minutes"
                 break
+            learning_rate = _budget_aware_learning_rate(
+                base_learning_rate,
+                total_iters_done,
+                planned_iters,
+                elapsed,
+                max_seconds,
+            )
+            for parameter_group in optimizer.param_groups:
+                parameter_group["lr"] = learning_rate
+            epoch_lrs.append(learning_rate)
             inputs = []
             targets = []
             for _ in range(batch_size):
                 chosen = str(rng.choice(train_stems))
-                image, target = _sample_crop(cache[chosen], crop_size, rng, rng.random() < 0.5)
+                image, target = _sample_crop(
+                    cache[chosen],
+                    crop_size,
+                    rng,
+                    rng.random() < 0.5,
+                    train_class_coordinates[chosen],
+                )
                 image, target = _augment(image, target, rng)
                 inputs.append(image)
                 targets.append(target)
@@ -337,15 +459,24 @@ def train(args: argparse.Namespace) -> dict[str, object]:
             loss = segmentation_loss(model(input_tensor), target_tensor)
             loss.backward()
             optimizer.step()
-            scheduler.step()
             epoch_loss += float(loss.detach())
             steps += 1
+            total_iters_done += 1
         if not steps:
             break
+        training_wall_s = time.monotonic() - epoch_started
         val_metrics = _validation_metrics(model, validation_crops, torch.device("cpu"))
+        epoch_wall_s = time.monotonic() - epoch_started
+        wall_s = time.monotonic() - started
         row = {
             "epoch": epoch,
             "train_loss": epoch_loss / steps,
+            "lr": epoch_lrs[-1],
+            "wall_s": epoch_wall_s,
+            "total_wall_s": wall_s,
+            "iters_done": steps,
+            "total_iters_done": total_iters_done,
+            "seconds_per_iter": training_wall_s / steps,
             **val_metrics,
         }
         epochs.append(row)
@@ -354,10 +485,16 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         if score > best_miou:
             best_miou = score
             best_epoch = epoch
+            best_epoch_pixel_agreement = float(
+                val_metrics["agreement_with_classical_v1_pixel"]
+            )
             stale_epochs = 0
             torch.save(model.state_dict(), output_dir / "weights.pt")
         else:
             stale_epochs += 1
+        if wall_s >= max_seconds:
+            stop_reason = "max_train_minutes"
+            break
         if stop_reason == "max_train_minutes":
             break
         if stale_epochs >= patience:
@@ -372,8 +509,14 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     metrics = {
         "epochs": epochs,
         "best_epoch": best_epoch,
+        "best_agreement_with_classical_v1_miou": best_miou,
+        "best_epoch_agreement_with_classical_v1_pixel": best_epoch_pixel_agreement,
         "stop_reason": stop_reason,
         "wall_s": wall_s,
+        "note": (
+            "agreement with classical_v1 pseudo-labels, NOT accuracy; "
+            "classical_v1 is not ground truth"
+        ),
         "weights_sha256": weights_sha,
     }
     run_config = {
@@ -382,6 +525,8 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "seed": seed,
         "train_stems": train_stems,
         "val_stems": val_stems,
+        "missing_train_stems": missing_train_stems,
+        "missing_val_stems": missing_val_stems,
         "encoder_weights": training_config.get("encoder_weights"),
         "hyperparameters": training_config,
         "torch_version": torch.__version__,

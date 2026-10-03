@@ -19,6 +19,7 @@ from sem.qc.config import load_config
 from sem.qc.io import list_stems, load_stem, valid_mask
 from sem.qc.models.pred_store import write_prediction
 from sem.qc.models.unet import UNetPseudoV1
+from sem.qc.partial_data import list_complete_stems
 from sem.qc.schema import CLASS_NAMES, Instance, Prediction
 
 
@@ -86,7 +87,9 @@ def _save_overlay(
 
 
 def run(
-    method_name: str, run_dir: str | Path | None = None
+    method_name: str,
+    run_dir: str | Path | None = None,
+    allow_partial: bool = False,
 ) -> list[tuple[str, float]]:
     if method_name not in ("classical_v1", "unet_pseudo_v1"):
         raise ValueError(f"Unsupported method {method_name!r}")
@@ -104,9 +107,26 @@ def run(
         if configured_run_dir is None:
             raise ValueError("unet_pseudo_v1 requires --run-dir or config run_dir")
         method = UNetPseudoV1.from_run_dir(configured_run_dir)
-    records = list_stems(data_root)
-    if len(records) != 31:
-        raise RuntimeError(f"Expected 31 stems in {data_root}, found {len(records)}")
+    if allow_partial:
+        manifest_path = (
+            Path(__file__).resolve().parents[1]
+            / "data"
+            / "splits"
+            / "manifest.csv"
+        )
+        records, missing_stems = list_complete_stems(
+            data_root, work_root, manifest_path
+        )
+        (output_root / "missing_stems.json").write_text(
+            json.dumps(missing_stems, indent=2) + "\n", encoding="utf-8"
+        )
+        print(f"Missing stems ({len(missing_stems)}): {missing_stems}", flush=True)
+        if not records:
+            raise RuntimeError(f"No complete stems found in {data_root}")
+    else:
+        records = list_stems(data_root)
+        if len(records) != 31:
+            raise RuntimeError(f"Expected 31 stems in {data_root}, found {len(records)}")
 
     runtimes = []
     batch_overlays = set()
@@ -159,8 +179,11 @@ def main() -> None:
         "method", choices=("classical_v1", "unet_pseudo_v1")
     )
     parser.add_argument("--run-dir")
+    parser.add_argument("--allow-partial", action="store_true")
     args = parser.parse_args()
-    runtimes = run(args.method, run_dir=args.run_dir)
+    runtimes = run(
+        args.method, run_dir=args.run_dir, allow_partial=args.allow_partial
+    )
     for stem, seconds in runtimes:
         print(f"{stem}: {seconds:.3f}s")
     print(f"Mean runtime: {np.mean([value for _, value in runtimes]):.3f}s/image")

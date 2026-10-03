@@ -191,7 +191,7 @@ def test_model_resolution_lists_available_ids():
     assert resolve_model_id(client, "claude-opus-5-5") == "claude-opus-5-5"
 
 
-def test_cli_classifies_candidate_from_synthetic_tiffs(tmp_path, monkeypatch):
+def test_cli_classifies_candidate_from_synthetic_tiffs(tmp_path, monkeypatch, capsys):
     data_root = tmp_path / "data"
     batch = data_root / "Batch_1"
     batch.mkdir(parents=True)
@@ -231,3 +231,53 @@ def test_cli_classifies_candidate_from_synthetic_tiffs(tmp_path, monkeypatch):
     assert len(rows) == 1
     assert rows[0]["item_id"] == "it-1"
     assert rows[0]["class_name"] == "pore"
+    output_text = capsys.readouterr().out
+    assert "n_items_sent=1" in output_text
+    assert "input_tokens=4" in output_text
+    assert "output_tokens=5" in output_text
+
+
+def test_candidate_view_iterator_caches_one_stem_and_preserves_stable_order(
+    monkeypatch,
+):
+    import scripts.vlm_classify as vlm_classify
+
+    items = [
+        {"item_id": "b-first", "stem": "b"},
+        {"item_id": "a-first", "stem": "a"},
+        {"item_id": "b-second", "stem": "b"},
+    ]
+    records = {"a": object(), "b": object()}
+    loaded = []
+
+    def fake_load_stem(record):
+        loaded.append(record)
+        return {"BSE": np.zeros((1, 1), dtype=np.uint8)}
+
+    monkeypatch.setattr(vlm_classify, "load_stem", fake_load_stem)
+    batches = list(vlm_classify._items_with_cached_views(items, records))
+    assert [item["item_id"] for item, _ in batches] == [
+        "a-first",
+        "b-first",
+        "b-second",
+    ]
+    assert loaded == [records["a"], records["b"]]
+    assert batches[1][1] is batches[2][1]
+
+
+def test_cost_summary_separates_api_errors_from_parse_failures(capsys):
+    from scripts.vlm_classify import _print_cost_summary
+
+    _print_cost_summary(
+        [
+            {
+                "parse_ok": False,
+                "error": "API unavailable",
+                "usage": None,
+            }
+        ]
+    )
+
+    output_text = capsys.readouterr().out
+    assert "n_parse_failures=0" in output_text
+    assert "n_api_errors=1" in output_text

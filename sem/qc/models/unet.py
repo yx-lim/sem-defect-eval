@@ -196,6 +196,51 @@ def _classical_agglomerate_instances_hook(
     return instances
 
 
+def instances_from_semantic(
+    semantic: np.ndarray,
+    uncertainty: np.ndarray,
+    min_area: int,
+    source: str,
+) -> list[Instance]:
+    semantic = np.asarray(semantic)
+    uncertainty = np.asarray(uncertainty)
+    if semantic.ndim != 2 or uncertainty.shape != semantic.shape:
+        raise ValueError("semantic and uncertainty must be co-registered HxW arrays")
+    class_names = {
+        2: "bright_particle",
+        3: "pore",
+        4: "subsurface_uncertain",
+        5: "crack_intraparticle",
+        6: "interparticle_gap",
+        7: "artifact",
+    }
+    structure = np.ones((3, 3), dtype=bool)
+    instances = []
+    for class_id, class_name in class_names.items():
+        labels, _ = ndi.label(semantic == class_id, structure=structure)
+        for label_id, region in enumerate(ndi.find_objects(labels), start=1):
+            if region is None:
+                continue
+            component = labels[region] == label_id
+            if int(np.count_nonzero(component)) < min_area:
+                continue
+            y_slice, x_slice = region
+            y0, x0 = int(y_slice.start), int(x_slice.start)
+            y1, x1 = int(y_slice.stop), int(x_slice.stop)
+            uncertainty_region = uncertainty[region]
+            instances.append(
+                Instance(
+                    class_name=class_name,
+                    subtype="other" if class_id == 7 else None,
+                    bbox=[x0, y0, x1, y1],
+                    polygon=_component_polygon(component, x0, y0),
+                    score=float(np.mean(1.0 - uncertainty_region[component])),
+                    source=source,
+                )
+            )
+    return instances
+
+
 class UNetPseudoV1:
     name = "unet_pseudo_v1"
 
@@ -244,34 +289,9 @@ class UNetPseudoV1:
         uncertainty[~valid] = 0.0
 
         minimum_area = int(self.config.get("instance_min_area_px", 16))
-        instances = []
-        for class_id in (2, 3, 4, 5, 6, 7):
-            labels, count = ndi.label(semantic == class_id, structure=np.ones((3, 3)))
-            for label_id in range(1, count + 1):
-                component = labels == label_id
-                if int(component.sum()) < minimum_area:
-                    continue
-                rows, cols = np.nonzero(component)
-                x0, x1 = int(cols.min()), int(cols.max()) + 1
-                y0, y1 = int(rows.min()), int(rows.max()) + 1
-                name = {
-                    2: "bright_particle",
-                    3: "pore",
-                    4: "subsurface_uncertain",
-                    5: "crack_intraparticle",
-                    6: "interparticle_gap",
-                    7: "artifact",
-                }[class_id]
-                instances.append(
-                    Instance(
-                        class_name=name,
-                        subtype="other" if class_id == 7 else None,
-                        bbox=[x0, y0, x1, y1],
-                        polygon=_component_polygon(component, x0, y0),
-                        score=float(np.mean(1.0 - uncertainty[component])),
-                        source=self.name,
-                    )
-                )
+        instances = instances_from_semantic(
+            semantic, uncertainty, minimum_area, self.name
+        )
         instances.extend(
             _classical_agglomerate_instances_hook(
                 semantic == 2, self.classical_config, self.name

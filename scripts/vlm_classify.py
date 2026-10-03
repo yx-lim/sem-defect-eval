@@ -160,6 +160,39 @@ def _views_for_item(item: dict, records: dict[str, object]) -> dict[str, np.ndar
     return load_stem(record)
 
 
+def _items_with_cached_views(
+    candidates: list[dict], records: dict[str, object]
+):
+    current_stem = None
+    current_views = None
+    for item in sorted(candidates, key=lambda candidate: str(candidate["stem"])):
+        stem = item["stem"]
+        if stem != current_stem:
+            current_views = _views_for_item(item, records)
+            current_stem = stem
+        yield item, current_views
+
+
+def _print_cost_summary(records: list[dict]) -> None:
+    usage = [record.get("usage") or {} for record in records]
+    input_tokens = sum(int(item.get("input_tokens", 0) or 0) for item in usage)
+    output_tokens = sum(int(item.get("output_tokens", 0) or 0) for item in usage)
+    parse_failures = sum(
+        not bool(record.get("parse_ok")) and not bool(record.get("error"))
+        for record in records
+    )
+    api_errors = sum(bool(record.get("error")) for record in records)
+    print(
+        "VLM summary: "
+        f"n_items_sent={len(records)} "
+        f"n_parse_failures={parse_failures} "
+        f"n_api_errors={api_errors} "
+        f"input_tokens={input_tokens} "
+        f"output_tokens={output_tokens}",
+        flush=True,
+    )
+
+
 def _dry_run(
     candidates: list[dict],
     records: dict[str, object],
@@ -169,7 +202,7 @@ def _dry_run(
     system, template = load_prompt(prompt_path)
     dry_dir = output_path.parent / "dry_run"
     dry_dir.mkdir(parents=True, exist_ok=True)
-    for item in candidates:
+    for item, views in _items_with_cached_views(candidates, records):
         proposal = item["proposal"]
         if proposal.get("polygon"):
             points = np.asarray(proposal["polygon"], dtype=np.float64)
@@ -187,7 +220,6 @@ def _dry_run(
                 tile["x0"] + tile["w"],
                 tile["y0"] + tile["h"],
             )
-        views = _views_for_item(item, records)
         crops = render_views(views["BSE"], views["Inlens"], bbox, proposal.get("polygon"))
         item_dir = dry_dir / item["item_id"]
         item_dir.mkdir(parents=True, exist_ok=True)
@@ -243,11 +275,18 @@ def main(argv: list[str] | None = None) -> None:
     candidates = [item for item in candidates if item["item_id"] not in existing_ids]
     if args.limit is not None:
         candidates = candidates[: max(0, args.limit)]
+    candidates = sorted(candidates, key=lambda item: str(item["stem"]))
     records = {
         record.stem: record for record in list_stems(config["paths"]["data_root"])
     }
     if args.dry_run:
         _dry_run(candidates, records, output_path, args.prompt)
+        _print_cost_summary([])
+        return
+    if not candidates:
+        if not output_path.exists():
+            write_jsonl(output_path, [])
+        _print_cost_summary([])
         return
 
     import anthropic
@@ -256,19 +295,19 @@ def main(argv: list[str] | None = None) -> None:
     preferred = str(config.get("vlm_claude_crops", {}).get("model_preferred", ""))
     model_id = resolve_model_id(client, preferred)
     results = list(existing)
-    for item in candidates:
-        results.append(
-            classify_item(
-                client,
-                model_id,
-                item,
-                _views_for_item(item, records),
-                prompt_path=args.prompt,
-            )
+    sent_results = []
+    for item, views in _items_with_cached_views(candidates, records):
+        result = classify_item(
+            client,
+            model_id,
+            item,
+            views,
+            prompt_path=args.prompt,
         )
+        results.append(result)
+        sent_results.append(result)
         write_jsonl(output_path, results)
-    if not candidates and not output_path.exists():
-        write_jsonl(output_path, [])
+    _print_cost_summary(sent_results)
 
 
 if __name__ == "__main__":
