@@ -318,6 +318,7 @@ def create_app(
                             "points": inst.get("polygon") or [],
                         }
                         for inst in proposal.get("instances") or []
+                        if len(inst.get("polygon") or []) >= 3
                     ]
         return {
             "status": status,
