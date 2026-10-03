@@ -67,7 +67,7 @@ Group = stem, except stems the similarity check (`scripts/stem_similarity.py`) f
 Strata = batch × detector_set. Within a stratum order groups by sha256(f"{seed}:{group_id}") hex ascending; n = #groups;
 n_test = round(0.2n), n_val = round(0.2n); if n ≥ 3 ensure n_test ≥ 1 and n_val ≥ 1; first n_test → test, next n_val → val, rest → train. seed = 20261003.
 Manifest `data/splits/manifest.csv` (committed): stem, group_id, batch, detector_set, split, views, height, width, pixel_size_nm, n_nongray_px, files_sha256 (";"-joined). Plus `data/splits/manifest_summary.md`.
-Rules: GT review items only from val+test stems; headline metrics on test; val only for threshold/hyper-parameter choices; training only on train stems. Split is FROZEN after human approval (checkpoint 1); `split.py` must assert the committed manifest hash on load.
+Rules: GT review items only from val+test stems; headline metrics on test; val only for threshold/hyper-parameter choices; training only on train stems. Split is FROZEN after human approval (checkpoint 1); `split.py` must assert the committed manifest hash on load; the approved hash lives in `configs/qc.yaml` key `split.frozen_manifest_sha256` (null = not yet frozen).
 
 ## 4. Evaluation (`sem/qc/eval/`)
 Only `is_ground_truth` items. Headline metrics = random-stratum items on test stems; uncertainty-stratum and val reported separately.
