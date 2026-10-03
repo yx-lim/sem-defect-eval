@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script>
+  // All URLs are relative; make sure the page URL ends with "/" so they resolve under a proxy sub-path.
+  if (!location.pathname.endsWith("/")) {
+    location.replace(location.pathname + "/" + location.search + location.hash);
+  }
+</script>
+<title>SEM QC review</title>
+<link rel="stylesheet" href="static/app.css">
+</head>
+<body>
+<header>
+  <h1>SEM QC review</h1>
+  <label>Reviewer <input id="reviewer" size="10" placeholder="your id"></label>
+  <div id="progress-wrap" title="reviewed / total">
+    <div id="progress-bar"><div id="progress-fill"></div></div>
+    <span id="progress-text">0 / 0</span>
+  </div>
+  <button id="btn-export" title="Write review/export_gt.jsonl (accepted / relabeled / redrawn only)">Export GT</button>
+  <button id="btn-help">Shortcuts (?)</button>
+  <span id="status-msg"></span>
+</header>
+<div id="layout">
+  <aside id="sidebar">
+    <section class="filters">
+      <label>Kind <select id="f-kind"><option value="">all</option><option value="candidate">candidate</option><option value="exhaustive_tile">exhaustive_tile</option></select></label>
+      <label>Class <select id="f-class"><option value="">all</option></select></label>
+      <label>Status <select id="f-status">
+        <option value="">all</option><option value="unreviewed">unreviewed</option><option value="reviewed">reviewed</option>
+        <option value="accepted">accepted</option><option value="rejected">rejected</option><option value="relabeled">relabeled</option>
+        <option value="redrawn">redrawn</option><option value="uncertain">uncertain</option></select></label>
+      <label class="inline"><input type="checkbox" id="auto-advance" checked> auto-advance</label>
+      <button id="btn-next-unrev" title="n">Next unreviewed (n)</button>
+    </section>
+    <section id="progress-detail"></section>
+    <section><div id="list-count"></div><ul id="item-list"></ul></section>
+  </aside>
+  <main id="main">
+    <div id="empty-msg">Select an item.</div>
+    <div id="item-view" hidden>
+      <div id="item-meta"></div>
+      <div id="human-current"></div>
+      <div id="panels">
+        <figure><figcaption>BSE</figcaption><canvas id="cv-bse"></canvas></figure>
+        <figure><figcaption>Inlens</figcaption><canvas id="cv-inlens"></canvas></figure>
+        <figure><figcaption>Context (BSE, box = item)</figcaption><img id="img-context" alt="context"></figure>
+      </div>
+      <div class="row" id="overlay-controls">
+        <label class="inline"><input type="checkbox" id="overlay-toggle" checked> overlay (o)</label>
+        <label>opacity <input type="range" id="overlay-opacity" min="0" max="100" value="45"></label>
+        <span id="legend"></span>
+      </div>
+
+      <div id="editor-tools" class="row">
+        <span class="tool-label">Tool:</span>
+        <button data-tool="brush" title="b">Brush (b)</button>
+        <button data-tool="eraser" title="e">Eraser (e)</button>
+        <button data-tool="polygon" title="p">Polygon (p)</button>
+        <button data-tool="none" title="Esc">Pan/none</button>
+        <label>Class <select id="draw-class"></select></label>
+        <label id="draw-subtype-wrap">Subtype <select id="draw-subtype"></select></label>
+        <label>Size <input type="range" id="brush-size" min="1" max="40" value="6"><span id="brush-size-val">6</span></label>
+        <button id="btn-undo" title="Ctrl+Z / z">Undo (z)</button>
+        <button id="btn-clear">Clear</button>
+        <span id="tool-hint"></span>
+      </div>
+      <div id="instance-list" class="row"></div>
+
+      <div id="actions-candidate" class="row actions">
+        <button id="btn-accept" class="ok" title="a">Accept (a)</button>
+        <button id="btn-reject" class="bad" title="r">Reject (r)</button>
+        <span class="group">
+          <select id="relabel-class"></select>
+          <select id="relabel-subtype"></select>
+          <button id="btn-relabel" title="l">Relabel (l)</button>
+        </span>
+        <button id="btn-redraw" title="d">Redraw (d)</button>
+        <button id="btn-save-redraw" class="ok" title="s">Save redraw (s)</button>
+        <button id="btn-uncertain" class="warn" title="u">Mark uncertain (u)</button>
+        <button id="btn-reset" title="Remove the current decision (appends a reset row)">Reset</button>
+      </div>
+      <div id="actions-tile" class="row actions">
+        <button id="btn-accept-tile" class="ok" title="a">Accept as is (a)</button>
+        <button id="btn-save-edits" class="ok" title="s">Save edits (s)</button>
+        <button id="btn-uncertain-tile" class="warn" title="u">Mark uncertain (u)</button>
+        <button id="btn-reset-tile">Reset</button>
+      </div>
+      <div class="row">
+        <label class="notes">Notes <textarea id="notes" rows="2" cols="70" placeholder="free text, saved with the next decision"></textarea></label>
+      </div>
+      <details id="vlm-panel">
+        <summary>VLM suggestion — not ground truth (display only)</summary>
+        <div id="vlm-body"></div>
+      </details>
+    </div>
+  </main>
+</div>
+<div id="help" hidden>
+  <h3>Keyboard shortcuts</h3>
+  <table>
+    <tr><td>a</td><td>Accept (candidate) / Accept as is (tile)</td></tr>
+    <tr><td>r</td><td>Reject (candidate)</td></tr>
+    <tr><td>l</td><td>Relabel with the class in the relabel dropdown</td></tr>
+    <tr><td>d</td><td>Toggle redraw mode (candidate)</td></tr>
+    <tr><td>s</td><td>Save redraw / Save edits</td></tr>
+    <tr><td>u</td><td>Mark uncertain</td></tr>
+    <tr><td>n</td><td>Next unreviewed</td></tr>
+    <tr><td>j / k, &rarr; / &larr;</td><td>Next / previous item in list</td></tr>
+    <tr><td>b / e / p / Esc</td><td>Brush / eraser / polygon / cancel polygon</td></tr>
+    <tr><td>Enter or double-click</td><td>Close polygon</td></tr>
+    <tr><td>0–7, i</td><td>Drawing class (i = ignore)</td></tr>
+    <tr><td>[ / ]</td><td>Brush size</td></tr>
+    <tr><td>z, Ctrl+Z</td><td>Undo</td></tr>
+    <tr><td>o</td><td>Toggle overlay</td></tr>
+    <tr><td>?</td><td>This help</td></tr>
+  </table>
+  <p>Eraser: on exhaustive tiles it restores the pre-filled label; on candidate redraws it clears to ignore (255).</p>
+  <button id="btn-help-close">Close</button>
+</div>
+<script src="static/app.js"></script>
+</body>
+</html>
