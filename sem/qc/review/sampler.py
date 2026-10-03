@@ -956,6 +956,10 @@ def build_review_set(
     return {"items": items, "summary": summary}
 
 
+def _md_cell(text: str) -> str:
+    return text.replace("|", "\\|")
+
+
 def _write_counts_md(
     path: Path, items: list[dict[str, Any]], summary: dict[str, Any]
 ) -> None:
@@ -1019,12 +1023,12 @@ def _write_counts_md(
     ]
     for stratum, stats in sorted(summary["exhaustive"]["strata"].items()):
         lines.append(
-            f"| {stratum} (exhaustive) | {stats['population']} "
+            f"| {_md_cell(stratum)} (exhaustive) | {stats['population']} "
             f"| {stats['n_random']} | — |"
         )
     for stratum, stats in sorted(strata.items()):
         lines.append(
-            f"| {stratum} | {stats['population']} "
+            f"| {_md_cell(stratum)} | {stats['population']} "
             f"| {stats['n_random']} | {stats['weight']} |"
         )
 
@@ -1037,6 +1041,8 @@ def _write_counts_md(
             )
     if cand["shortfall"]:
         lines.append(f"- total candidates shortfall: {cand['shortfall']}")
+    if lines[-1] == "":
+        lines.append("- none")
 
     lines += [
         "",
