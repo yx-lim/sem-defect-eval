@@ -60,3 +60,22 @@ split:
   test_fraction: 0.2
   val_fraction: 0.2
   frozen_manifest_sha256: null
+
+unet_pseudo_v1:
+  arch: smp_resnet18
+  encoder_weights: null
+  instance_min_area_px: 16
+  ignore_if_classical_uncertainty_gt: 0.5
+  crop_size_px: 256
+  batch_size: 8
+  iters_per_epoch: 200
+  max_epochs: 100
+  early_stop_patience: 4
+  max_train_minutes: 100
+  learning_rate: 0.001
+  weight_decay: 0.0001
+
+pipeline_v0_proposals: {}
+
+vlm_claude_crops:
+  model_preferred: claude-opus-5-5

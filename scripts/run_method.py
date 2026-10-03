@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sem.qc.classical import ClassicalV1
 from sem.qc.config import load_config
 from sem.qc.io import list_stems, load_stem, valid_mask
+from sem.qc.models.pred_store import write_prediction
+from sem.qc.models.unet import UNetPseudoV1
 from sem.qc.schema import CLASS_NAMES, Instance, Prediction
 
 
@@ -83,8 +85,10 @@ def _save_overlay(
     canvas.save(path)
 
 
-def run(method_name: str) -> list[tuple[str, float]]:
-    if method_name != "classical_v1":
+def run(
+    method_name: str, run_dir: str | Path | None = None
+) -> list[tuple[str, float]]:
+    if method_name not in ("classical_v1", "unet_pseudo_v1"):
         raise ValueError(f"Unsupported method {method_name!r}")
     config = load_config()
     data_root = Path(config["paths"]["data_root"])
@@ -93,7 +97,13 @@ def run(method_name: str) -> list[tuple[str, float]]:
     output_root.mkdir(parents=True, exist_ok=True)
     overlay_root = output_root / "overlays"
     overlay_root.mkdir(parents=True, exist_ok=True)
-    method = ClassicalV1(config["classical_v1"])
+    if method_name == "classical_v1":
+        method = ClassicalV1(config["classical_v1"])
+    else:
+        configured_run_dir = run_dir or config["unet_pseudo_v1"].get("run_dir")
+        if configured_run_dir is None:
+            raise ValueError("unet_pseudo_v1 requires --run-dir or config run_dir")
+        method = UNetPseudoV1.from_run_dir(configured_run_dir)
     records = list_stems(data_root)
     if len(records) != 31:
         raise RuntimeError(f"Expected 31 stems in {data_root}, found {len(records)}")
@@ -109,23 +119,29 @@ def run(method_name: str) -> list[tuple[str, float]]:
         elapsed = time.perf_counter() - start
         runtimes.append((record.stem, elapsed))
 
-        Image.fromarray(prediction.semantic, mode="L").save(
-            output_root / f"{record.stem}_semantic.png"
-        )
-        if prediction.uncertainty is not None:
-            uncertainty = np.rint(prediction.uncertainty * 255).astype(np.uint8)
-            Image.fromarray(uncertainty, mode="L").save(
-                output_root / f"{record.stem}_uncertainty.png"
+        if method_name == "unet_pseudo_v1":
+            write_prediction(output_root, record.stem, prediction)
+        else:
+            Image.fromarray(prediction.semantic, mode="L").save(
+                output_root / f"{record.stem}_semantic.png"
             )
-        with (output_root / f"{record.stem}_instances.json").open(
-            "w", encoding="utf-8"
-        ) as output_file:
-            json.dump(
-                [_serialize_instance(instance) for instance in prediction.instances],
-                output_file,
-                indent=2,
-                sort_keys=True,
-            )
+            if prediction.uncertainty is not None:
+                uncertainty = np.rint(prediction.uncertainty * 255).astype(np.uint8)
+                Image.fromarray(uncertainty, mode="L").save(
+                    output_root / f"{record.stem}_uncertainty.png"
+                )
+            with (output_root / f"{record.stem}_instances.json").open(
+                "w", encoding="utf-8"
+            ) as output_file:
+                json.dump(
+                    [
+                        _serialize_instance(instance)
+                        for instance in prediction.instances
+                    ],
+                    output_file,
+                    indent=2,
+                    sort_keys=True,
+                )
         if record.batch not in batch_overlays:
             _save_overlay(
                 overlay_root / f"{record.batch}.png",
@@ -139,9 +155,12 @@ def run(method_name: str) -> list[tuple[str, float]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("method", choices=("classical_v1",))
+    parser.add_argument(
+        "method", choices=("classical_v1", "unet_pseudo_v1")
+    )
+    parser.add_argument("--run-dir")
     args = parser.parse_args()
-    runtimes = run(args.method)
+    runtimes = run(args.method, run_dir=args.run_dir)
     for stem, seconds in runtimes:
         print(f"{stem}: {seconds:.3f}s")
     print(f"Mean runtime: {np.mean([value for _, value in runtimes]):.3f}s/image")
