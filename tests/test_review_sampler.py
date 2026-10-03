@@ -23,6 +23,7 @@ from sem.qc.schema import read_jsonl
 from conftest import (
     CLASSES,
     H,
+    _instance,
     REVIEW_CONFIG,
     STEMS,
     W,
@@ -586,3 +587,94 @@ def test_cached_iou_matches_polygon_iou():
         entry_a = (entry_a[0], entry_a[1], int(entry_a[1].sum()))
         entry_b = (entry_b[0], entry_b[1], int(entry_b[1].sum()))
         assert _iou_cached(entry_a, entry_b) == pytest.approx(expected)
+
+
+def _write_method_semantic(preds: Path, method: str, stem: str,
+                           components, uncertainty=None):
+    from conftest import H, W, BORDER
+
+    method_dir = preds / method
+    method_dir.mkdir(parents=True, exist_ok=True)
+    sem = np.zeros((H, W), dtype=np.uint8)
+    sem[:BORDER, :] = 255
+    sem[-BORDER:, :] = 255
+    sem[:, :BORDER] = 255
+    sem[:, -BORDER:] = 255
+    for class_id, (y0, x0, h, w) in components:
+        sem[y0 : y0 + h, x0 : x0 + w] = class_id
+    Image.fromarray(sem, mode="L").save(method_dir / f"{stem}_semantic.png")
+    if uncertainty is not None:
+        u = np.full((H, W), uncertainty, dtype=np.uint8)
+        Image.fromarray(u, mode="L").save(
+            method_dir / f"{stem}_uncertainty.png"
+        )
+
+
+def test_cc_exclude_methods(tmp_path):
+    stems = [("a", "Batch_1", "val"), ("b", "Batch_1", "test")]
+    manifest = write_manifest(tmp_path / "m.csv", stems=stems)
+    preds = tmp_path / "preds"
+    comps = [(3, (100, 100, 10, 10))]  # one 100px pore component
+    for stem, _b, _s in stems:
+        _write_method_semantic(preds, "classical_v1", stem, comps)
+        (preds / "classical_v1" / f"{stem}_instances.json").write_text("[]")
+        _write_method_semantic(preds, "excluded_m", stem, comps)
+        (preds / "excluded_m" / f"{stem}_instances.json").write_text(
+            json.dumps(
+                [
+                    _instance("pore", 0, 0, 0, "excluded_m:orig"),
+                    _instance("unmapped", 0, 0, 1, "excluded_m"),
+                ]
+            )
+        )
+    cfg = dict(REVIEW_CONFIG)
+    cfg["cc_min_area_px"] = {
+        "pore": 64, "bright_particle": 64,
+        "crack_intraparticle": 40, "interparticle_gap": 40,
+    }
+    cfg["cc_exclude_methods"] = ["excluded_m"]
+    out = tmp_path / "review"
+    r = build_review_set(manifest, preds, out, cfg, manifest_sha256=_sha(manifest))
+    summary = r["summary"]
+    assert summary["candidates"]["cc_methods"] == ["classical_v1"]
+    strata = summary["candidates"]["strata"]
+    assert not any(
+        s.startswith("pore|excluded_m:semantic_cc") for s in strata
+    )
+    pool_sources = summary["candidates"]["pool_per_source"]
+    assert pool_sources.get("classical_v1:semantic_cc", 0) > 0
+    # its instances.json records still enter the pool
+    assert pool_sources.get("excluded_m", 0) == 2
+    # 'unmapped' filtered by candidate_classes
+    assert not any(
+        i["kind"] == "candidate" and i["proposal"]["class_name"] == "unmapped"
+        for i in r["items"]
+    )
+
+
+def test_blank_start_five(synthetic):
+    cfg = dict(synthetic["config"])
+    cfg["blank_start_tiles"] = 5
+    build_review_set(
+        manifest_path=synthetic["manifest"],
+        preds_root=synthetic["preds"],
+        out_dir=synthetic["out"],
+        review_config=cfg,
+        manifest_sha256=_sha(synthetic["manifest"]),
+    )
+    items = _items(synthetic)
+    blanks = [i for i in items if i.get("prefill") == "blank"]
+    assert len(blanks) == 5
+    assert all(i["kind"] == "exhaustive_tile" for i in blanks)
+    assert all(i["sampling"]["method"] == "random" for i in blanks)
+    out2 = synthetic["out"].parent / "review2"
+    build_review_set(
+        manifest_path=synthetic["manifest"],
+        preds_root=synthetic["preds"],
+        out_dir=out2,
+        review_config=cfg,
+        manifest_sha256=_sha(synthetic["manifest"]),
+    )
+    ids2 = [i["item_id"] for i in read_jsonl(out2 / "items.jsonl")
+            if i.get("prefill") == "blank"]
+    assert ids2 == [i["item_id"] for i in blanks]
