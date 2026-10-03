@@ -8,7 +8,7 @@ const S = {
   labels: null, base: null,        // Uint8Array w*h (current edit / pre-fill or 255)
   polygons: [],                    // [{class_name, subtype, points: [[x,y]] tile coords}]
   propPolygon: null,               // candidate proposal polygon (tile coords)
-  undo: [], dirty: false,
+  undo: [], dirty: false, vlmViewed: false,
   tool: "none", drawClass: 0, drawSubtype: null, brush: 6,
   redrawMode: false, polyPts: [], painting: false, lastPt: null, hover: null,
   overlayOn: true, opacity: 0.45,
@@ -146,11 +146,12 @@ async function openItem(id) {
   // ui
   const isTile = it.kind === "exhaustive_tile";
   $("actions-candidate").hidden = isTile; $("actions-tile").hidden = !isTile;
+  $("btn-accept-tile").hidden = isTile && it.prefill === "blank";
   setDrawClassOptions(it.kind);
   $("relabel-class").value = it.proposal.class_name || "matrix_other";
   $("relabel-subtype").value = it.proposal.subtype || "";
   $("notes").value = (h && h.notes) || "";
-  $("vlm-panel").open = false;
+  $("vlm-panel").open = false; S.vlmViewed = false;
   renderVlm(it.vlm_suggestion);
   renderMeta();
   setTool(isTile ? "brush" : "none");
@@ -351,7 +352,7 @@ async function uploadMask() {
 }
 async function decide(status, extra = {}) {
   const rid = reviewer(); if (!rid || !S.cur) return;
-  const body = { status, class_name: null, subtype: null, polygons: [], semantic_png: null, notes: $("notes").value, reviewer_id: rid, ...extra };
+  const body = { status, class_name: null, subtype: null, polygons: [], semantic_png: null, notes: $("notes").value, reviewer_id: rid, vlm_viewed: !!S.vlmViewed, ...extra };
   try {
     const res = await api(`items/${S.cur.item_id}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     S.dirty = false;
@@ -419,7 +420,9 @@ function bindUi() {
   $("btn-save-redraw").onclick = () => saveDrawing(false);
   $("btn-uncertain").onclick = () => decide("uncertain");
   $("btn-reset").onclick = () => decide(null);
+  $("vlm-panel").addEventListener("toggle", () => { if ($("vlm-panel").open) S.vlmViewed = true; });
   $("btn-accept-tile").onclick = () => {
+    if (S.cur && S.cur.prefill === "blank") { flash("Blank-start tile: label it and use Save edits", true); return; }
     if (S.dirty && !confirm("You have unsaved edits. 'Accept as is' records the pre-fill unchanged. Continue?")) return;
     decide("accepted");
   };
