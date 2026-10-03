@@ -600,6 +600,7 @@ def build_review_set(
                 if inst.get("class_name") not in candidate_classes:
                     continue
                 record = dict(inst)
+                record["proposal_source"] = inst.get("source")
                 record["source"] = method
                 record["method"] = method
                 record["stem"] = stem
@@ -609,8 +610,10 @@ def build_review_set(
 
     # semantic connected-component candidates from every method's semantic map
     cc_min_area = review_config.get("cc_min_area_px") or {}
+    cc_exclude = set(review_config.get("cc_exclude_methods") or [])
+    cc_methods = [m for m in methods if m not in cc_exclude]
     if cc_min_area:
-        for method in methods:
+        for method in cc_methods:
             for stem in used_stems:
                 cc_semantic = (
                     semantics[stem]
@@ -867,6 +870,7 @@ def build_review_set(
                     "uncertainty": inst["uncertainty"],
                     "duplicates": inst.get("duplicates", []),
                     "method": inst.get("method"),
+                    "proposal_source": inst.get("proposal_source"),
                     "area_px": inst.get("area_px"),
                 },
                 "vlm_suggestion": None,
@@ -940,6 +944,7 @@ def build_review_set(
             "per_method": per_method,
             "id_collisions": id_collisions,
             "pool_per_source": dict(pool_per_source),
+            "cc_methods": cc_methods,
             "n_random_requested": n_random_candidates,
             "n_uncertainty_requested": n_unc_candidates,
             "shortfall": max(0, n_candidates - len(chosen_candidates)),
@@ -1053,6 +1058,7 @@ def _write_counts_md(
         f"- pool_final: {cand['pool_final']}",
         f"- duplicates_merged: {cand['duplicates_merged']}",
         f"- id_collisions: {cand['id_collisions']}",
+        f"- cc methods: {', '.join(cand.get('cc_methods') or [])}",
     ]
     prefill_counts: dict[str, int] = defaultdict(int)
     for item in items:
