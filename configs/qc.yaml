@@ -60,3 +60,18 @@ split:
   test_fraction: 0.2
   val_fraction: 0.2
   frozen_manifest_sha256: null
+
+qc_eval:
+  headline_split: test
+  headline_stratum: random
+  match_iou:
+    bright_particle: 0.5
+    pore: 0.5
+    crack_intraparticle: 0.3
+    interparticle_gap: 0.3
+    agglomerate: 0.3
+  object_min_area_px: 1
+  pred_object_max_ignored_frac: 0.5
+  min_gt_objects: 5
+  gallery_top_k: 10
+  gallery_panel_px: 200
