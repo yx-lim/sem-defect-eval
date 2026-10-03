@@ -241,3 +241,125 @@ def test_crop_context_prefill_pngs(client):
     assert client.get(f"/api/items/{cand['item_id']}/prefill.png").status_code == 404
     assert client.get(f"/api/items/{cand['item_id']}/mask.png").status_code == 404
     assert client.get("/api/items/nonexistent").status_code == 404
+
+
+def _blank_client(synthetic, tmp_path, n_blank=1):
+    import hashlib as _hl
+    from fastapi.testclient import TestClient as TC
+    cfg = dict(synthetic["config"])
+    cfg["blank_start_tiles"] = n_blank
+    build_review_set(
+        manifest_path=synthetic["manifest"],
+        preds_root=synthetic["preds"],
+        out_dir=synthetic["out"],
+        review_config=cfg,
+        manifest_sha256=_hl.sha256(
+            synthetic["manifest"].read_bytes()
+        ).hexdigest(),
+    )
+    static_dir = tmp_path / "static_b"
+    static_dir.mkdir(exist_ok=True)
+    (static_dir / "index.html").write_text("<html>ok</html>")
+    app = create_app(
+        review_dir=synthetic["out"],
+        image_loader=FakeLoader(),
+        static_dir=static_dir,
+    )
+    return TC(app)
+
+
+def _tile(client, prefill=None):
+    for item in client.get("/api/items?kind=exhaustive_tile").json()["items"]:
+        full = client.get(f"/api/items/{item['item_id']}").json()
+        if prefill is None or full.get("prefill") == prefill:
+            return full
+    raise AssertionError(f"no tile with prefill={prefill}")
+
+
+def test_changed_px_frac_classical_tile(client):
+    item = _tile(client, "classical_v1")
+    w, h = item["tile"]["w"], item["tile"]["h"]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    k = 17
+    mask.ravel()[:k] = 3
+    client.post(
+        f"/api/items/{item['item_id']}/mask", content=mask.tobytes()
+    )
+    r = client.post(
+        f"/api/items/{item['item_id']}/decision",
+        json={
+            "status": "redrawn",
+            "reviewer_id": "ann",
+            "semantic_png": f"masks/{item['item_id']}.png",
+        },
+    )
+    assert r.status_code == 200, r.text
+    human = r.json()["human"]
+    assert human["changed_px_frac"] > 0
+    # expected: fraction of the mask differing from the classical prefill crop
+    pre = client.get(f"/api/items/{item['item_id']}/prefill.png")
+    ref = np.asarray(Image.open(io.BytesIO(pre.content)))
+    expected = float(np.mean(mask != ref))
+    assert human["changed_px_frac"] == pytest.approx(expected)
+    assert human["changed_px_frac_vs_classical"] == pytest.approx(expected)
+
+    r = client.post(
+        f"/api/items/{item['item_id']}/decision",
+        json={"status": "accepted", "reviewer_id": "ann"},
+    )
+    human = r.json()["human"]
+    assert human["changed_px_frac"] == 0.0
+    assert human["changed_px_frac_vs_classical"] == 0.0
+
+
+def test_blank_tile_decisions(synthetic, tmp_path):
+    client = _blank_client(synthetic, tmp_path, n_blank=1)
+    blank = _tile(client, "blank")
+    iid = blank["item_id"]
+    w, h = blank["tile"]["w"], blank["tile"]["h"]
+    r = client.post(
+        f"/api/items/{iid}/decision",
+        json={"status": "accepted", "reviewer_id": "ann"},
+    )
+    assert r.status_code == 422
+    m = 25
+    mask = np.full((h, w), 255, dtype=np.uint8)
+    mask.ravel()[:m] = 1
+    client.post(f"/api/items/{iid}/mask", content=mask.tobytes())
+    r = client.post(
+        f"/api/items/{iid}/decision",
+        json={
+            "status": "redrawn",
+            "reviewer_id": "ann",
+            "semantic_png": f"masks/{iid}.png",
+            "vlm_viewed": True,
+        },
+    )
+    assert r.status_code == 200, r.text
+    human = r.json()["human"]
+    assert human["changed_px_frac"] == pytest.approx(m / (w * h))
+    # vs classical reference (the hidden prefill crop still on disk)
+    ref_rel = blank["proposal"]["reference_semantic_png"]
+    import pathlib
+    ref = np.asarray(
+        Image.open(pathlib.Path(synthetic["out"]) / ref_rel)
+    )
+    assert human["changed_px_frac_vs_classical"] == pytest.approx(
+        float(np.mean(mask != ref))
+    )
+    assert human["vlm_viewed"] is True
+
+
+def test_vlm_viewed_validation(client):
+    item = _some_item(client)
+    r = client.post(
+        f"/api/items/{item['item_id']}/decision",
+        json={"status": "accepted", "reviewer_id": "ann"},
+    )
+    assert r.json()["human"]["vlm_viewed"] is False
+    r = client.post(
+        f"/api/items/{item['item_id']}/decision",
+        json={"status": "accepted", "reviewer_id": "ann",
+              "vlm_viewed": "yes"},
+    )
+    assert r.status_code == 422

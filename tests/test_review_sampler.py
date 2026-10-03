@@ -392,3 +392,148 @@ def test_largest_remainder_budget_exceeds_demand():
 
     demand = {"a": 3, "b": 2, "c": 0}
     assert _largest_remainder(10, demand) == {"a": 3, "b": 2, "c": 0}
+
+
+# ---- semantic connected-component candidates -----------------------------
+
+def _write_cc_preds(preds: Path, stem: str, components, uncertainty=128):
+    """Write a semantic png with drawn components + flat uncertainty map."""
+    from conftest import H, W, BORDER
+
+    method_dir = preds / "classical_v1"
+    method_dir.mkdir(parents=True, exist_ok=True)
+    sem = np.zeros((H, W), dtype=np.uint8)
+    sem[:BORDER, :] = 255
+    sem[-BORDER:, :] = 255
+    sem[:, :BORDER] = 255
+    sem[:, -BORDER:] = 255
+    for class_id, (y0, x0, h, w) in components:
+        sem[y0 : y0 + h, x0 : x0 + w] = class_id
+    Image.fromarray(sem, mode="L").save(method_dir / f"{stem}_semantic.png")
+    u = np.full((H, W), uncertainty, dtype=np.uint8)
+    Image.fromarray(u, mode="L").save(method_dir / f"{stem}_uncertainty.png")
+    (method_dir / f"{stem}_instances.json").write_text("[]")
+
+
+def test_cc_candidates_extracted(tmp_path):
+    stems = [("a", "Batch_1", "val"), ("b", "Batch_1", "test")]
+    manifest = write_manifest(tmp_path / "m.csv", stems=stems)
+    preds = tmp_path / "preds"
+    # class ids: pore=3, crack=5
+    comps = [
+        (3, (100, 100, 10, 10)),   # pore 100px keep
+        (3, (300, 100, 10, 10)),   # pore 100px keep
+        (3, (500, 100, 10, 10)),   # pore 100px keep
+        (3, (700, 100, 5, 6)),     # pore 30px dropped
+        (5, (100, 600, 1, 40)),    # crack 40px keep
+        (5, (300, 600, 2, 20)),    # crack 40px keep
+    ]
+    for stem, _b, _s in stems:
+        _write_cc_preds(preds, stem, comps)
+    cfg = dict(REVIEW_CONFIG)
+    cfg["cc_min_area_px"] = {
+        "pore": 64, "bright_particle": 64,
+        "crack_intraparticle": 40, "interparticle_gap": 40,
+    }
+    out = tmp_path / "review"
+    r = build_review_set(manifest, preds, out, cfg, manifest_sha256=_sha(manifest))
+    summary = r["summary"]
+    strata = summary["candidates"]["strata"]
+    assert strata["pore|classical_v1:semantic_cc"]["population"] == 6
+    assert strata["crack_intraparticle|classical_v1:semantic_cc"]["population"] == 4
+    items = r["items"]
+    cc = [i for i in items if i["kind"] == "candidate"
+          and i["proposal"]["source"].endswith(":semantic_cc")]
+    assert cc, "expected cc candidates"
+    for item in cc:
+        assert item["proposal"]["score"] is None
+        assert item["proposal"]["method"] == "classical_v1"
+        assert item["proposal"]["area_px"] >= 40
+        assert item["proposal"]["uncertainty"] == pytest.approx(128 / 255)
+        assert item["sampling"]["weight"] == pytest.approx(
+            strata[item["sampling"]["stratum"]]["population"]
+            / summary["candidates"]["strata"][item["sampling"]["stratum"]]["n_random"]
+        )
+    bboxes = {tuple(i["proposal"]["bbox"]) for i in cc}
+    assert (100, 100, 110, 110) in bboxes  # exact component bbox
+
+
+def test_uncertainty_picks_round_robin(tmp_path):
+    from collections import Counter
+
+    stems = [("a", "Batch_1", "val"), ("b", "Batch_1", "test")]
+    manifest = write_manifest(tmp_path / "m.csv", stems=stems)
+    preds = tmp_path / "preds"
+    comps = []
+    for i in range(20):  # 20 pores 64px
+        comps.append((3, (20 + i * 30, 20, 10, 10)))
+    for i in range(20):  # 20 cracks 40px
+        comps.append((5, (20 + i * 30, 400, 1, 40)))
+    for i in range(20):  # 20 bright 64px
+        comps.append((2, (20 + i * 30, 700, 10, 10)))
+    for stem, _b, _s in stems:
+        _write_cc_preds(preds, stem, comps)
+    cfg = dict(REVIEW_CONFIG)
+    cfg["cc_min_area_px"] = {
+        "pore": 64, "bright_particle": 64,
+        "crack_intraparticle": 40, "interparticle_gap": 40,
+    }
+    out = tmp_path / "review"
+    r = build_review_set(manifest, preds, out, cfg, manifest_sha256=_sha(manifest))
+    per_class = r["summary"]["candidates"]["per_class"]
+    unc = {c: per_class[c]["n_uncertainty"] for c in ("pore", "crack_intraparticle", "bright_particle")}
+    assert sum(v > 0 for v in unc.values()) >= 2
+    assert max(unc.values()) - min(unc.values()) <= 1
+    # every class hit its 6-item floor via random picks
+    for c in ("pore", "crack_intraparticle", "bright_particle"):
+        assert per_class[c]["n_random"] >= 6
+
+
+def test_blank_start_tiles(synthetic):
+    cfg = dict(synthetic["config"])
+    cfg["blank_start_tiles"] = 2
+    build_review_set(
+        manifest_path=synthetic["manifest"],
+        preds_root=synthetic["preds"],
+        out_dir=synthetic["out"],
+        review_config=cfg,
+        manifest_sha256=_sha(synthetic["manifest"]),
+    )
+    items = _items(synthetic)
+    tiles = [i for i in items if i["kind"] == "exhaustive_tile"]
+    blanks = [i for i in tiles if i["prefill"] == "blank"]
+    assert len(blanks) == 2
+    for item in blanks:
+        assert item["sampling"]["method"] == "random"
+        assert item["proposal"]["semantic_png"] is None
+        assert item["proposal"]["instances"] == []
+        ref = item["proposal"]["reference_semantic_png"]
+        assert ref and (synthetic["out"] / ref).exists()
+    assert all(i["prefill"] == "blank" for i in blanks)
+    assert all(
+        i["sampling"]["method"] == "random" or i["prefill"] != "blank"
+        for i in tiles
+    )
+    non_blank = [i for i in tiles if i["prefill"] != "blank"]
+    assert all(i["prefill"] == "classical_v1" for i in non_blank)
+
+    # deterministic blank selection
+    out2 = synthetic["out"].parent / "review2"
+    build_review_set(
+        manifest_path=synthetic["manifest"],
+        preds_root=synthetic["preds"],
+        out_dir=out2,
+        review_config=cfg,
+        manifest_sha256=_sha(synthetic["manifest"]),
+    )
+    items2 = read_jsonl(out2 / "items.jsonl")
+    assert [
+        i["item_id"] for i in items2 if i.get("prefill") == "blank"
+    ] == [i["item_id"] for i in blanks]
+
+
+def test_no_blank_when_zero(synthetic):
+    _build(synthetic)
+    items = _items(synthetic)
+    tiles = [i for i in items if i["kind"] == "exhaustive_tile"]
+    assert all(i["prefill"] == "classical_v1" for i in tiles)
