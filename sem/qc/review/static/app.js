@@ -383,7 +383,7 @@ async function nextUnreviewed() {
   if ($("f-kind").value) q.set("kind", $("f-kind").value);
   if ($("f-class").value) q.set("class_name", $("f-class").value);
   const r = await api("next_unreviewed?" + q);
-  if (r.item_id) { S.dirty = false; await openItem(r.item_id); } else flash("No unreviewed items in this filter");
+  if (r.item_id) { await openItem(r.item_id); } else flash("No unreviewed items in this filter");
 }
 function step(d) {
   if (!S.filtered.length) return;
