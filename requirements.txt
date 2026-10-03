@@ -3,7 +3,7 @@ scipy==1.11.4
 scikit-image==0.22.0
 scikit-learn==1.4.2
 tifffile==2024.2.12
-imagecodecs==2024.1.1
+imagecodecs==2024.6.1
 pillow==10.2.0
 pyyaml==6.0.1
 pandas==2.2.1

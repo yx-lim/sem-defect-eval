@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -23,12 +24,17 @@ from conftest import (
 )
 
 
+def _sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def _build(synthetic):
     return build_review_set(
         manifest_path=synthetic["manifest"],
         preds_root=synthetic["preds"],
         out_dir=synthetic["out"],
         review_config=synthetic["config"],
+        manifest_sha256=_sha(synthetic["manifest"]),
     )
 
 
@@ -104,7 +110,7 @@ def test_shortfall_reported(tmp_path):
     data = [i for i in json.loads(inst_path.read_text()) if i["class_name"] != "pore"]
     inst_path.write_text(json.dumps(data))
     out = tmp_path / "review"
-    build_review_set(manifest, preds, out, dict(REVIEW_CONFIG))
+    build_review_set(manifest, preds, out, dict(REVIEW_CONFIG), manifest_sha256=_sha(manifest))
     summary = json.loads((out / "summary.json").read_text())
     assert summary["candidates"]["per_class"]["pore"]["shortfall_vs_min"] > 0
 
@@ -119,7 +125,7 @@ def test_determinism(tmp_path):
         write_method_preds(
             preds, "unet_pseudo_v1", STEMS, method_idx=1, duplicate_of="x"
         )
-        build_review_set(manifest, preds, out, dict(REVIEW_CONFIG))
+        build_review_set(manifest, preds, out, dict(REVIEW_CONFIG), manifest_sha256=_sha(manifest))
         results.append(
             (
                 (out / "items.jsonl").read_bytes(),
@@ -204,7 +210,7 @@ def test_works_with_one_and_three_methods(tmp_path):
         for m in range(1, n_methods):
             write_method_preds(preds, f"m{m}", STEMS, method_idx=m)
         out = tmp_path / f"review{n_methods}"
-        build_review_set(manifest, preds, out, dict(REVIEW_CONFIG))
+        build_review_set(manifest, preds, out, dict(REVIEW_CONFIG), manifest_sha256=_sha(manifest))
         items = read_jsonl(out / "items.jsonl")
         assert items
 
@@ -249,6 +255,18 @@ def test_refuse_overwrite_with_decisions(synthetic):
         preds_root=synthetic["preds"],
         out_dir=synthetic["out"],
         review_config=synthetic["config"],
+        manifest_sha256=_sha(synthetic["manifest"]),
         force=True,
     )
     assert _build_forced["items"]
+
+
+def test_frozen_manifest_hash_mismatch(synthetic):
+    with pytest.raises(AssertionError, match="hash mismatch"):
+        build_review_set(
+            manifest_path=synthetic["manifest"],
+            preds_root=synthetic["preds"],
+            out_dir=synthetic["out"],
+            review_config=synthetic["config"],
+            manifest_sha256="0" * 64,
+        )

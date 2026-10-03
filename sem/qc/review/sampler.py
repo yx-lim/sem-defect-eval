@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import math
@@ -16,6 +15,7 @@ from PIL import Image
 from skimage.draw import polygon as draw_polygon
 
 from sem.qc.schema import IGNORE_LABEL, make_item_id, write_jsonl
+from sem.qc.split import load_manifest as _frozen_load_manifest
 
 
 def _round_half_down(x: float) -> int:
@@ -28,17 +28,18 @@ def _stratum_rng(seed: int, stratum: str) -> np.random.Generator:
     return np.random.default_rng([int(seed), digest])
 
 
-def load_manifest(path: str | Path) -> dict[str, dict[str, Any]]:
+def load_manifest(
+    path: str | Path, expected_sha256: str | None = None
+) -> dict[str, dict[str, Any]]:
     """Load the split manifest, keeping only val/test rows keyed by stem."""
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Split manifest is required but missing: {path}")
     rows: dict[str, dict[str, Any]] = {}
-    with path.open(newline="", encoding="utf-8") as manifest_file:
-        for row in csv.DictReader(manifest_file):
-            if row.get("split") not in {"val", "test"}:
-                continue
-            rows[row["stem"]] = row
+    for row in _frozen_load_manifest(path, expected_sha256):
+        if row.get("split") not in {"val", "test"}:
+            continue
+        rows[row["stem"]] = row
     return rows
 
 
@@ -280,6 +281,7 @@ def build_review_set(
     out_dir: str | Path,
     review_config: dict[str, Any],
     tile_px: int = 512,
+    manifest_sha256: str | None = None,
     use_vlm: bool = False,
     image_loader: Any = None,
     force: bool = False,
@@ -319,7 +321,7 @@ def build_review_set(
     dedup_iou = float(review_config["dedup_iou"])
     min_context_px = int(review_config["candidate_min_context_px"])
 
-    manifest = load_manifest(manifest_path)
+    manifest = load_manifest(manifest_path, manifest_sha256)
     methods = list_methods(preds_root)
     if prefill not in methods:
         raise FileNotFoundError(

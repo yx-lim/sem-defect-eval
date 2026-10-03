@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 
@@ -23,6 +24,9 @@ def client(synthetic, tmp_path):
         preds_root=synthetic["preds"],
         out_dir=synthetic["out"],
         review_config=synthetic["config"],
+        manifest_sha256=hashlib.sha256(
+            synthetic["manifest"].read_bytes()
+        ).hexdigest(),
     )
     static_dir = tmp_path / "static"
     static_dir.mkdir()

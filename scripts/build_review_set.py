@@ -38,6 +38,7 @@ def main() -> None:
         out_dir=args.out,
         review_config=config["review"],
         tile_px=int(config["tile_sizes"]["exhaustive_review_px"]),
+        manifest_sha256=config.get("split", {}).get("frozen_manifest_sha256"),
         use_vlm=args.vlm,
         image_loader=image_loader,
         force=args.force,
