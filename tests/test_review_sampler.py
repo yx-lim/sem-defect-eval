@@ -351,3 +351,44 @@ def test_same_tile_collision_merged_not_dropped(tmp_path):
     s = r["summary"]["candidates"]
     assert s["pool_before_dedup"] == s["pool_final"] + s["duplicates_merged"] + s["id_collisions"]
     assert s["id_collisions"] == 1
+
+
+def test_largest_remainder_real_strata():
+    from sem.qc.review.sampler import _largest_remainder
+
+    demand = {
+        "test|Batch_1": 52, "test|Batch_2": 52, "test|Batch_3": 195,
+        "val|Batch_1": 52, "val|Batch_2": 52, "val|Batch_3": 208,
+    }
+    assert _largest_remainder(18, demand) == {
+        "test|Batch_1": 2, "test|Batch_2": 2, "test|Batch_3": 6,
+        "val|Batch_1": 1, "val|Batch_2": 1, "val|Batch_3": 6,
+    }
+
+
+def test_largest_remainder_properties():
+    from sem.qc.review.sampler import _largest_remainder
+
+    cases = [
+        ({"a": 1, "b": 1, "c": 100}, 10),
+        ({"a": 5, "b": 5, "c": 5}, 7),
+        ({"x": 3, "y": 30, "z": 60}, 20),
+        ({"a": 2, "b": 2}, 3),
+    ]
+    for demand, budget in cases:
+        total = sum(demand.values())
+        alloc = _largest_remainder(budget, demand)
+        assert sum(alloc.values()) == min(budget, total)
+        for k, n in demand.items():
+            assert 0 <= alloc[k] <= n
+            if total:
+                quota = budget * n / total
+                if alloc[k] < n:
+                    assert abs(alloc[k] - quota) < 1 or alloc[k] == int(quota) + 1
+
+
+def test_largest_remainder_budget_exceeds_demand():
+    from sem.qc.review.sampler import _largest_remainder
+
+    demand = {"a": 3, "b": 2, "c": 0}
+    assert _largest_remainder(10, demand) == {"a": 3, "b": 2, "c": 0}

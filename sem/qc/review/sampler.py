@@ -93,7 +93,7 @@ def _valid_fraction(semantic: np.ndarray, x0: int, y0: int, tile_px: int) -> flo
 def _largest_remainder(
     budget: int, demand: dict[str, int]
 ) -> dict[str, int]:
-    """Proportional allocation; largest remainder wins, name breaks ties."""
+    """Hamilton allocation: floors then leftover seats by (-remainder, name)."""
     keys = sorted(key for key, size in demand.items() if size > 0)
     total = sum(demand[key] for key in keys)
     alloc = {key: 0 for key in demand}
@@ -102,23 +102,19 @@ def _largest_remainder(
     quotas = {key: budget * demand[key] / total for key in keys}
     for key in keys:
         alloc[key] = min(int(quotas[key]), demand[key])
+    order = sorted(
+        keys, key=lambda k: (-(quotas[k] - math.floor(quotas[k])), k)
+    )
     while sum(alloc.values()) < budget:
-        candidates = [
-            key
-            for key in keys
-            if alloc[key] < demand[key]
-        ]
-        if not candidates:
+        progressed = False
+        for key in order:
+            if sum(alloc.values()) >= budget:
+                break
+            if alloc[key] < demand[key]:
+                alloc[key] += 1
+                progressed = True
+        if not progressed:
             break
-        best = max(candidates, key=lambda k: (quotas[k] - math.floor(quotas[k]),))
-        # deterministic tie-break: among equal remainders pick smallest name
-        best_remainder = quotas[best] - math.floor(quotas[best])
-        tied = [
-            k
-            for k in candidates
-            if (quotas[k] - math.floor(quotas[k])) == best_remainder
-        ]
-        alloc[min(tied)] += 1
     return alloc
 
 
