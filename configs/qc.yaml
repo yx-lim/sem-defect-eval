@@ -60,3 +60,29 @@ split:
   test_fraction: 0.2
   val_fraction: 0.2
   frozen_manifest_sha256: be8b7db697a38a53cbb34f76bdcd336810f8c17bcc4b445efd96e783ae8ab8b3
+
+review:
+  seed: 20261003
+  n_exhaustive: 25
+  exhaustive_uncertainty_frac: 0.3      # 25 -> 7 uncertainty, 18 random
+  exhaustive_min_valid_frac: 0.9
+  exhaustive_uncertainty_stride_px: 256
+  prefill_method: classical_v1
+  n_candidates: 60
+  candidate_uncertainty_frac: 0.3       # 60 -> 18 uncertainty, 42 random
+  candidate_min_per_class: 6
+  candidate_classes: [pore, crack_intraparticle, interparticle_gap, agglomerate, artifact, bright_particle]
+  dedup_iou: 0.5
+  candidate_min_context_px: 128
+  candidate_min_random_per_stratum: 3
+  candidate_max_tile_px: 1024
+  cc_min_area_px: {pore: 64, bright_particle: 64, crack_intraparticle: 40, interparticle_gap: 40}
+  blank_start_tiles: 5
+  cc_exclude_methods: [pipeline_v0_proposals]
+  context_scale: 3.0
+  context_max_px: 512
+  vlm:
+    model_id: claude-opus-5-5
+    prompt_path: sem/qc/models/vlm_prompt_v1.txt
+    prompt_version: vlm_prompt_v1
+    max_tokens: 2000
