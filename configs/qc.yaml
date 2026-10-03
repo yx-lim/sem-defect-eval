@@ -59,4 +59,4 @@ classical_v1:
 split:
   test_fraction: 0.2
   val_fraction: 0.2
-  frozen_manifest_sha256: null
+  frozen_manifest_sha256: be8b7db697a38a53cbb34f76bdcd336810f8c17bcc4b445efd96e783ae8ab8b3
