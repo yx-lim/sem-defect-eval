@@ -13,6 +13,7 @@ from typing import Any, Iterable
 import numpy as np
 from PIL import Image
 from scipy import ndimage as ndi
+from scipy import stats as scipy_stats
 from skimage.draw import polygon as draw_polygon
 from skimage.measure import approximate_polygon, find_contours
 
@@ -118,6 +119,79 @@ def _largest_remainder(
         if not progressed:
             break
     return alloc
+
+
+def _allocate_random_candidates(
+    stratum_sizes: dict[str, int],
+    n_random: int,
+    min_per_class: int,
+    min_per_stratum: int = 0,
+) -> tuple[dict[str, int], dict[str, Any] | None]:
+    """(alloc per stratum, oversubscription warning or None).
+
+    (a) per-stratum minimum, (b) per-class floor, (c) leftover by largest
+    remainder over remaining capacity.
+    """
+    alloc = {s: 0 for s in stratum_sizes}
+    warning = None
+    if min_per_stratum > 0:
+        nonempty = sorted(s for s, n in stratum_sizes.items() if n >= 1)
+        want = sum(min(min_per_stratum, stratum_sizes[s]) for s in nonempty)
+        if want <= n_random:
+            for s in nonempty:
+                alloc[s] = min(min_per_stratum, stratum_sizes[s])
+        else:
+            cap = n_random // len(nonempty)
+            for s in nonempty:
+                alloc[s] = min(cap, stratum_sizes[s])
+            warning = {
+                "min_per_stratum": min_per_stratum,
+                "applied_min": cap,
+                "n_strata": len(nonempty),
+                "n_random": n_random,
+                "requested_total": want,
+            }
+    budget_left = n_random - sum(alloc.values())
+    by_class: dict[str, list[str]] = defaultdict(list)
+    for stratum in stratum_sizes:
+        by_class[stratum.split("|")[0]].append(stratum)
+    for class_name in sorted(by_class):
+        strata = by_class[class_name]
+        n_c = sum(stratum_sizes[s] for s in strata)
+        need = max(
+            0, min(n_c, min_per_class) - sum(alloc[s] for s in strata)
+        )
+        demand = {s: stratum_sizes[s] - alloc[s] for s in strata}
+        sub = _largest_remainder(min(need, budget_left), demand)
+        for s, n in sub.items():
+            alloc[s] += n
+            budget_left -= n
+    while budget_left > 0:
+        remaining = {s: stratum_sizes[s] - alloc[s] for s in stratum_sizes}
+        if not any(v > 0 for v in remaining.values()):
+            break
+        extra = _largest_remainder(budget_left, remaining)
+        gained = sum(extra.values())
+        for s, n in extra.items():
+            alloc[s] += n
+        budget_left -= gained
+        if gained == 0:
+            break
+    return alloc, warning
+
+
+def _uncertainty_percentiles(pool: list[dict[str, Any]]) -> None:
+    """Rank each item's uncertainty within its own source, in place."""
+    by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for inst in pool:
+        inst["uncertainty_pct"] = None
+        if inst.get("uncertainty") is not None:
+            by_source[str(inst.get("source"))].append(inst)
+    for entries in by_source.values():
+        u = np.array([float(i["uncertainty"]) for i in entries])
+        pct = scipy_stats.rankdata(u, method="average") / len(u)
+        for inst, p in zip(entries, pct):
+            inst["uncertainty_pct"] = float(p)
 
 
 def _rect_intersects(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
@@ -689,28 +763,15 @@ def build_review_set(
     for stratum, entries in by_stratum.items():
         by_class[stratum.split("|")[0]].append(stratum)
 
-    alloc = {s: 0 for s in by_stratum}
-    budget_left = n_random_candidates
-    for class_name in sorted(by_class):
-        strata = by_class[class_name]
-        n_c = sum(len(by_stratum[s]) for s in strata)
-        floor_c = min(n_c, min_per_class)
-        demand = {s: len(by_stratum[s]) for s in strata}
-        sub = _largest_remainder(min(floor_c, budget_left), demand)
-        for s, n in sub.items():
-            alloc[s] += n
-            budget_left -= n
-    while budget_left > 0:
-        remaining = {s: len(by_stratum[s]) - alloc[s] for s in by_stratum}
-        if not any(v > 0 for v in remaining.values()):
-            break
-        extra = _largest_remainder(budget_left, remaining)
-        gained = sum(extra.values())
-        for s, n in extra.items():
-            alloc[s] += n
-        budget_left -= gained
-        if gained == 0:
-            break
+    min_per_stratum = int(
+        review_config.get("candidate_min_random_per_stratum", 0)
+    )
+    alloc, random_min_warning = _allocate_random_candidates(
+        {s: len(v) for s, v in by_stratum.items()},
+        n_random_candidates,
+        min_per_class,
+        min_per_stratum,
+    )
 
     chosen_candidates: dict[str, dict[str, Any]] = {}
     candidate_strata_stats: dict[str, dict[str, Any]] = {}
@@ -742,18 +803,20 @@ def build_review_set(
         n_random_used += n_s
 
     # ---- candidates: uncertainty part -----------------------------------
+    _uncertainty_percentiles(final_pool)
     remaining_pool = [
         inst for inst in final_pool if inst["item_id"] not in chosen_candidates
     ]
     n_unc_wanted = n_unc_candidates + (n_random_candidates - n_random_used)
-    # round-robin by class: each round, every class takes its most-uncertain
-    # remaining item (items with uncertainty None are never picked)
+    # round-robin by class: each round, every class takes the remaining item
+    # with the highest uncertainty percentile within its source (items with
+    # uncertainty None are never picked)
     remaining_by_class: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for inst in remaining_pool:
         if inst.get("uncertainty") is not None:
             remaining_by_class[inst["class_name"]].append(inst)
     for entries in remaining_by_class.values():
-        entries.sort(key=lambda i: (-float(i["uncertainty"]), i["item_id"]))
+        entries.sort(key=lambda i: (-float(i["uncertainty_pct"]), i["item_id"]))
     unc_index = {cls: 0 for cls in remaining_by_class}
     n_unc_used_cand = 0
     while n_unc_used_cand < n_unc_wanted:
@@ -868,6 +931,7 @@ def build_review_set(
                     "semantic_png": None,
                     "score": inst.get("score"),
                     "uncertainty": inst["uncertainty"],
+                    "uncertainty_pct": inst.get("uncertainty_pct"),
                     "duplicates": inst.get("duplicates", []),
                     "method": inst.get("method"),
                     "proposal_source": inst.get("proposal_source"),
@@ -945,6 +1009,8 @@ def build_review_set(
             "id_collisions": id_collisions,
             "pool_per_source": dict(pool_per_source),
             "cc_methods": cc_methods,
+            "min_random_per_stratum": min_per_stratum,
+            "random_min_warning": random_min_warning,
             "n_random_requested": n_random_candidates,
             "n_uncertainty_requested": n_unc_candidates,
             "shortfall": max(0, n_candidates - len(chosen_candidates)),
@@ -1046,6 +1112,14 @@ def _write_counts_md(
             )
     if cand["shortfall"]:
         lines.append(f"- total candidates shortfall: {cand['shortfall']}")
+    warn = cand.get("random_min_warning")
+    if warn:
+        lines.append(
+            "- random min per stratum oversubscribed: "
+            f"{warn['n_strata']} strata x {warn['min_per_stratum']} "
+            f"= {warn['requested_total']} > n_random {warn['n_random']}; "
+            f"capped at {warn['applied_min']} per stratum"
+        )
     if lines[-1] == "":
         lines.append("- none")
 
@@ -1059,6 +1133,7 @@ def _write_counts_md(
         f"- duplicates_merged: {cand['duplicates_merged']}",
         f"- id_collisions: {cand['id_collisions']}",
         f"- cc methods: {', '.join(cand.get('cc_methods') or [])}",
+        f"- min random per stratum: {cand.get('min_random_per_stratum', 0)}",
     ]
     prefill_counts: dict[str, int] = defaultdict(int)
     for item in items:

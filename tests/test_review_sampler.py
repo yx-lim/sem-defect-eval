@@ -678,3 +678,131 @@ def test_blank_start_five(synthetic):
     ids2 = [i["item_id"] for i in read_jsonl(out2 / "items.jsonl")
             if i.get("prefill") == "blank"]
     assert ids2 == [i["item_id"] for i in blanks]
+
+
+def test_allocate_random_min_per_stratum():
+    from sem.qc.review.sampler import _allocate_random_candidates as alloc_fn
+
+    alloc, warn = alloc_fn(
+        {"pore|m1": 2, "pore|m2": 5000, "crack_intraparticle|m1": 300},
+        n_random=20, min_per_class=6, min_per_stratum=3,
+    )
+    assert alloc["pore|m1"] == 2
+    assert all(alloc[s] >= min(3, n) for s, n in
+               {"pore|m1": 2, "pore|m2": 5000, "crack_intraparticle|m1": 300}.items())
+    assert sum(alloc.values()) == 20
+    assert warn is None
+
+
+def test_allocate_random_oversubscribed():
+    from sem.qc.review.sampler import _allocate_random_candidates as alloc_fn
+
+    sizes = {f"c|s{i}": 100 for i in range(5)}
+    alloc, warn = alloc_fn(sizes, n_random=10, min_per_class=1,
+                           min_per_stratum=3)
+    assert all(v >= 2 for v in alloc.values())
+    assert sum(alloc.values()) == 10
+    assert warn["applied_min"] == 2
+    assert warn["requested_total"] == 15
+
+    sizes7 = {f"c|s{i}": 100 for i in range(7)}
+    alloc7, warn7 = alloc_fn(sizes7, n_random=10, min_per_class=1,
+                             min_per_stratum=3)
+    assert min(alloc7.values()) == 1
+    assert sum(alloc7.values()) == 10
+    assert warn7["applied_min"] == 1
+    assert warn7["requested_total"] == 21
+
+
+def test_uncertainty_percentiles_and_ranking():
+    from sem.qc.review.sampler import _uncertainty_percentiles
+
+    pool = [
+        {"source": "m", "uncertainty": 0.5},
+        {"source": "m", "uncertainty": 0.5},
+        {"source": "m", "uncertainty": 1.0},
+        {"source": "m", "uncertainty": None},
+    ]
+    _uncertainty_percentiles(pool)
+    assert [i["uncertainty_pct"] for i in pool] == [0.5, 0.5, 1.0, None]
+
+
+def _build_two_source_class(tmp_path):
+    """Two methods each emitting one class with opposite uncertainty scales."""
+    stems = [("a", "Batch_1", "val"), ("b", "Batch_1", "test")]
+    manifest = write_manifest(tmp_path / "m.csv", stems=stems)
+    preds = tmp_path / "preds"
+    for s_idx, (stem, _b, _s) in enumerate(stems):
+        insts_hi = [
+            dict(_instance("pore", s_idx, 0, j, "m_hi"),
+                 score=0.05 + j * 0.001)
+            for j in range(8)
+        ]
+        insts_lo = [
+            dict(_instance("pore", s_idx, 1, j, "m_lo"),
+                 score=0.95 - j * 0.001)
+            for j in range(8)
+        ]
+        (preds / "m_hi").mkdir(parents=True, exist_ok=True)
+        (preds / "m_lo").mkdir(parents=True, exist_ok=True)
+        (preds / "m_hi" / f"{stem}_instances.json").write_text(
+            json.dumps(insts_hi))
+        (preds / "m_lo" / f"{stem}_instances.json").write_text(
+            json.dumps(insts_lo))
+        _write_method_semantic(preds, "classical_v1", stem, [])
+        (preds / "classical_v1" / f"{stem}_instances.json").write_text("[]")
+    cfg = dict(REVIEW_CONFIG)
+    cfg["n_candidates"] = 16
+    out = tmp_path / "review"
+    return build_review_set(
+        manifest, preds, out, cfg, manifest_sha256=_sha(manifest))
+
+
+def test_uncertainty_picks_span_sources(tmp_path):
+    r = _build_two_source_class(tmp_path)
+    unc = [
+        i for i in r["items"]
+        if i["kind"] == "candidate"
+        and i["sampling"]["method"] == "uncertainty"
+        and i["proposal"]["class_name"] == "pore"
+    ]
+    sources = {i["proposal"]["source"] for i in unc}
+    assert unc, "expected pore uncertainty picks"
+    assert len(sources) >= 2, sources
+
+
+def test_min_random_per_stratum_end_to_end(tmp_path):
+    stems = [("a", "Batch_1", "val"), ("b", "Batch_1", "test")]
+    manifest = write_manifest(tmp_path / "m.csv", stems=stems)
+    preds = tmp_path / "preds"
+    for s_idx, (stem, _b, _s) in enumerate(stems):
+        (preds / "m_small").mkdir(parents=True, exist_ok=True)
+        (preds / "m_big").mkdir(parents=True, exist_ok=True)
+        # pool of exactly 2 in m_small
+        (preds / "m_small" / f"{stem}_instances.json").write_text(
+            json.dumps([_instance("pore", s_idx, 0, 0, "m_small")]))
+        (preds / "m_big" / f"{stem}_instances.json").write_text(
+            json.dumps(
+                [_instance("pore", s_idx, 1, j, "m_big") for j in range(30)]
+            )
+        )
+        _write_method_semantic(preds, "classical_v1", stem, [])
+        (preds / "classical_v1" / f"{stem}_instances.json").write_text("[]")
+    cfg = dict(REVIEW_CONFIG)
+    cfg["candidate_min_random_per_stratum"] = 3
+    out = tmp_path / "review"
+    r = build_review_set(manifest, preds, out, cfg, manifest_sha256=_sha(manifest))
+    strata = r["summary"]["candidates"]["strata"]
+    small = [
+        i for i in r["items"]
+        if i["kind"] == "candidate"
+        and i["sampling"]["stratum"] == "pore|m_small"
+        and i["sampling"]["method"] == "random"
+    ]
+    assert len(small) == 2
+    assert all(i["sampling"]["weight"] == 1.0 for i in small)
+    for item in r["items"]:
+        if item["kind"] == "candidate" and item["sampling"]["method"] == "random":
+            st = strata[item["sampling"]["stratum"]]
+            assert item["sampling"]["weight"] == pytest.approx(
+                st["population"] / st["n_random"])
