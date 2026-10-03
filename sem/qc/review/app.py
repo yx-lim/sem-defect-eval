@@ -301,6 +301,15 @@ def create_app(
         if status == "redrawn" and not (semantic_png or polygons):
             raise HTTPException(422, "redrawn requires semantic_png or polygons")
         proposal = item.get("proposal") or {}
+        is_tile = item["kind"] == "exhaustive_tile"
+        is_blank = is_tile and item.get("prefill") == "blank"
+        if status == "accepted" and is_blank:
+            raise HTTPException(
+                422, "blank-start tiles must be labelled and saved as redrawn"
+            )
+        vlm_viewed = body.get("vlm_viewed", False)
+        if not isinstance(vlm_viewed, bool):
+            raise HTTPException(422, "vlm_viewed must be a boolean")
         if status == "accepted":
             if item["kind"] == "candidate":
                 if class_name is None:
@@ -320,6 +329,51 @@ def create_app(
                         for inst in proposal.get("instances") or []
                         if len(inst.get("polygon") or []) >= 3
                     ]
+        changed_px_frac = None
+        changed_px_frac_vs_classical = None
+        if is_tile:
+            if status == "accepted":
+                changed_px_frac = 0.0
+                changed_px_frac_vs_classical = 0.0
+            elif semantic_png:
+                mask_path = masks_dir / f"{item_id}.png"
+                if mask_path.exists():
+                    tile = item["tile"]
+                    mask = np.asarray(
+                        Image.open(mask_path), dtype=np.uint8
+                    )
+                    if is_blank:
+                        start = np.full(
+                            (int(tile["h"]), int(tile["w"])),
+                            IGNORE_LABEL,
+                            dtype=np.uint8,
+                        )
+                    else:
+                        start_rel = proposal.get("semantic_png")
+                        start = (
+                            np.asarray(
+                                Image.open(review_dir / start_rel),
+                                dtype=np.uint8,
+                            )
+                            if start_rel and (review_dir / start_rel).exists()
+                            else None
+                        )
+                    ref_rel = proposal.get("reference_semantic_png") or (
+                        proposal.get("semantic_png")
+                    )
+                    ref = (
+                        np.asarray(
+                            Image.open(review_dir / ref_rel), dtype=np.uint8
+                        )
+                        if ref_rel and (review_dir / ref_rel).exists()
+                        else None
+                    )
+                    if start is not None and start.shape == mask.shape:
+                        changed_px_frac = float(np.mean(mask != start))
+                    if ref is not None and ref.shape == mask.shape:
+                        changed_px_frac_vs_classical = float(
+                            np.mean(mask != ref)
+                        )
         return {
             "status": status,
             "class_name": class_name,
@@ -328,6 +382,9 @@ def create_app(
             "semantic_png": semantic_png,
             "notes": body.get("notes") or "",
             "reviewer_id": reviewer_id,
+            "vlm_viewed": vlm_viewed,
+            "changed_px_frac": changed_px_frac,
+            "changed_px_frac_vs_classical": changed_px_frac_vs_classical,
             "timestamp": datetime.now(timezone.utc)
             .isoformat()
             .replace("+00:00", "Z"),
