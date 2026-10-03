@@ -81,7 +81,7 @@ class EvalSettings:
             work_root=Path(config["paths"]["work_root"]),
             data_root=Path(config["paths"]["data_root"]),
             manifest_path=Path(__file__).resolve().parents[3] / "data/splits/manifest.csv",
-            frozen_manifest_sha256=config["paths"].get("frozen_manifest_sha256"),
+            frozen_manifest_sha256=config["split"].get("frozen_manifest_sha256"),
             n_boot=int(config["evaluation"]["bootstrap_replicates"]),
             seed=int(config["seeds"]["bootstrap"]),
             match_iou={k: float(v) for k, v in ev["match_iou"].items()},
@@ -270,7 +270,7 @@ def evaluate(settings: EvalSettings, with_errors: bool = True) -> dict[str, Any]
     warnings: list[str] = []
     if not manifest.frozen:
         warnings.append(
-            "Split manifest is NOT frozen (paths.frozen_manifest_sha256 is null); "
+            "Split manifest is NOT frozen (split.frozen_manifest_sha256 is null); "
             "hash check skipped. Results are provisional until checkpoint 1."
         )
 

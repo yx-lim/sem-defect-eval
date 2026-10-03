@@ -101,7 +101,8 @@ def degrade(label: np.ndarray, agglomerates, severity: float, rng: np.random.Gen
     pred[bright] = 0
     pred[np.roll(bright, (shift, shift), axis=(0, 1))] = 2
     pores = label == 3
-    pred[pores & ~ndi.binary_erosion(pores, iterations=max(1, shift))] = 0
+    if shift:
+        pred[pores & ~ndi.binary_erosion(pores, iterations=shift)] = 0
     sub = label == 4
     lab, n = ndi.label(sub)
     for k in range(1, n + 1):

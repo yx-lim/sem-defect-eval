@@ -1,6 +1,6 @@
 """FP/FN galleries: per class top-k unmatched regions by area (spec §4).
 
-Each row: BSE crop | GT overlay | prediction overlay, with the region outlined.
+Each row: BSE crop | GT overlay | prediction overlay, with the region outlined (ring just outside it).
 """
 
 from __future__ import annotations
@@ -61,7 +61,8 @@ def colorize(gray: np.ndarray, labels: np.ndarray) -> np.ndarray:
 
 
 def _outline(rgb: np.ndarray, mask: np.ndarray, color=(255, 255, 255)) -> np.ndarray:
-    edge = mask & ~ndi.binary_erosion(mask, structure=np.ones((3, 3), bool))
+    # Ring just outside the region so thin objects keep their overlay colour.
+    edge = ndi.binary_dilation(mask, structure=np.ones((3, 3), bool)) & ~mask
     out = rgb.copy()
     out[edge] = color
     return out

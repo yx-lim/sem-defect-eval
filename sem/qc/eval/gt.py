@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import warnings
+
 import numpy as np
 from PIL import Image
 
@@ -24,6 +26,7 @@ from sem.qc.schema import (
     read_jsonl,
     resolve_review_items,
 )
+from sem.qc.split import assert_frozen
 
 EVAL_SPLITS = ("val", "test")
 DECIDED_STATUSES = GROUND_TRUTH_STATUSES | {"rejected", "uncertain"}
@@ -108,11 +111,15 @@ def load_manifest(path: str | Path, frozen_sha256: str | None) -> Manifest:
     if not path.is_file():
         raise GroundTruthError(f"Split manifest not found: {path}")
     digest = file_sha256(path)
-    if frozen_sha256 is not None and digest != frozen_sha256:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # unfrozen: reported by eval
+            assert_frozen(path, frozen_sha256)
+    except AssertionError as exc:
         raise GroundTruthError(
-            f"Manifest hash check failed for {path}: sha256 {digest} != frozen "
-            f"{frozen_sha256}. The split must not change after approval."
-        )
+            f"Manifest hash check failed for {path}: {exc}. "
+            "The split must not change after approval."
+        ) from exc
     with path.open(newline="", encoding="utf-8") as handle:
         rows = {row["stem"]: row for row in csv.DictReader(handle)}
     if not rows:
