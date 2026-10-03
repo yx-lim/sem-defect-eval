@@ -8,3 +8,5 @@ pillow==10.2.0
 pyyaml==6.0.1
 pandas==2.2.1
 pytest==8.1.1
+matplotlib==3.8.3
+umap-learn==0.5.5

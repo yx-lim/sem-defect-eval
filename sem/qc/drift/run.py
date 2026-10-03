@@ -211,6 +211,14 @@ def _sig(p, alpha=0.05):
     return "**" if isinstance(p, float) and math.isfinite(p) and p < alpha else ""
 
 
+def _all_features_note(r) -> str:
+    c = r["confound"]
+    if (not c["changed_material_kpis"] and c["shifted_covariates"]
+            and r["status_all_features"] != analysis.STATUS_WITHIN):
+        return "; all-features signal: yes (covariates shifted)"
+    return ""
+
+
 def write_report(out, reference, incoming, stems, results, neg, pos, viz, evidence, cfg, n_perm, n_boot, method) -> str:
     alpha = float(cfg["alpha"])
     f = report._fmt
@@ -227,7 +235,7 @@ def write_report(out, reference, incoming, stems, results, neg, pos, viz, eviden
     L.append("## Summary\n")
     L.append("| incoming | flag (material features, spec rule) | flag (all features) | changed material KPIs (Holm p<0.05) | acquisition artifact could explain |\n|---|---|---|---|---|")
     for b, r in results.items():
-        L.append(f"| {b} | {r['status']} | {r['status_all_features']} | {', '.join(analysis.changed_material_kpis(r['kpi'], alpha)) or 'none'} | {r['confound']['acquisition_artifact_could_explain']} |")
+        L.append(f"| {b} | {r['status']} | {r['status_all_features']} | {', '.join(analysis.changed_material_kpis(r['kpi'], alpha)) or 'none'} | {r['confound']['acquisition_artifact_could_explain']}{_all_features_note(r)} |")
     L.append("")
     L.append("Flag rule (spec §5): \"different from reference\" if (stem MMD p<0.05 or >50% incoming stems over the "
              "leave-one-reference-stem-out Mahalanobis 95th pct) AND >=1 material KPI Holm p<0.05; \"investigate\" if any one; "
@@ -241,7 +249,8 @@ def write_report(out, reference, incoming, stems, results, neg, pos, viz, eviden
         L.append("### Per-KPI shifts\n")
         L.append(report.kpi_table(r["kpi"]))
         L.append("robust z = (median_inc - median_ref)/(1.4826 MAD_ref); `(std)` = MAD was 0, std used. "
-                 "CI = stem bootstrap percentile. p = two-sided stem-label permutation on |median difference|; "
+                 f"CI = stem bootstrap percentile. p = two-sided stem-label permutation ({cfg.get('permutation_statistic', 'rank_sum')} "
+                 "statistic; `p_raw_median_stat` in kpi_shifts.csv uses |median difference|); "
                  "Holm within material and within covariate family.\n")
         L.append("### Multivariate\n")
         L.append("| feature set | Mahalanobis: frac incoming over null 95th | null threshold D² | incoming D² (median) | stem MMD² | stem MMD p | tile MMD² | tile MMD p (stem-block perm) |\n|---|---|---|---|---|---|---|---|")
@@ -261,6 +270,10 @@ def write_report(out, reference, incoming, stems, results, neg, pos, viz, eviden
         L.append(f"**Acquisition artifact could explain: {c['acquisition_artifact_could_explain']}**\n")
         for reason in c["reasons"]:
             L.append(f"- {reason}")
+        if _all_features_note(r):
+            L.append(f"- all-features variant is \"{r['status_all_features']}\" while the material-only flag is \"{r['status']}\": "
+                     f"the extra signal comes from acquisition covariates ({', '.join(c['shifted_covariates'])} shifted at Holm p<{alpha}); "
+                     "acquisition artifact could explain the all-features signal: yes")
         L.append(f"\nSpearman rho across all {len(stems)} stems (KPIs: {', '.join(sorted(set(c['spearman'].kpi))) if len(c['spearman']) else 'none'}; "
                  f"|rho|>{cfg['confound_spearman_abs_rho']} marked):\n")
         if len(c["spearman"]):
@@ -300,7 +313,8 @@ def write_report(out, reference, incoming, stems, results, neg, pos, viz, eviden
         L.append("| method | " + " | ".join(pos) + " |\n|---|" + "---|" * len(pos))
         for m in methods:
             L.append(f"| {m} | " + " | ".join(f(pos[s]["splits_4v3_detection_rate"][m]) for s in pos) + " |")
-        L.append("\nFull design (all 7 shifted copies vs the 7 originals; paired copies, so optimistic):\n")
+        L.append("\nFull design (all 7 shifted copies vs the 7 originals; same stems before/after the shift, "
+                 "tested with the unpaired stem-label permutation):\n")
         L.append("| method | " + " | ".join(pos) + " |\n|---|" + "---|" * len(pos))
         for m in methods:
             L.append(f"| {m} | " + " | ".join(str(pos[s]["full_7v7"]["fires"].get(m)) for s in pos) + " |")
@@ -315,6 +329,19 @@ def write_report(out, reference, incoming, stems, results, neg, pos, viz, eviden
                 vals.append(f"{f(row.robust_z)}{' *' if row.p_holm < alpha else ''}")
             L.append(f"| {feat} | " + " | ".join(vals) + " |")
         L.append("\n`*` = Holm p<0.05 within family.\n")
+        pcc = cfg["positive_control"]
+        nominal_crack = float(pcc["cracks_per_mm2"]) * float(np.mean(pcc["crack_length_px"])) * 0.025
+        L.append("Measured median difference (shifted - original) vs nominal injected amount:\n")
+        L.append("| feature | nominal injected | " + " | ".join(pos) + " |\n|---|---|" + "---|" * len(pos))
+        for feat, nominal, shift in (("void_fraction", float(pcc["void_fraction_delta"]), "voids"),
+                                     ("crack_density_um_per_mm2", nominal_crack, "cracks")):
+            vals = []
+            for s_ in pos:
+                k = pos[s_]["full_7v7"]["kpi"]
+                vals.append(f(k[k.feature == feat].iloc[0].median_diff))
+            L.append(f"| {feat} | {f(nominal)} ({shift}) | " + " | ".join(vals) + " |")
+        L.append("\nNominal crack density assumes mean length (25 nm/px) and no overlap; classical_v1 recovers only part of the "
+                 "injected amount, and the shift is small relative to between-stem reference spread.\n")
     else:
         L.append("Positive control skipped (--skip-positive).\n")
     L.append("## Visualization (not a decision input)\n")

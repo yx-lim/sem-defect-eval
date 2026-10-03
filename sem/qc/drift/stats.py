@@ -276,6 +276,8 @@ def mmd2_from_kernel(kernel: np.ndarray, is_inc: np.ndarray) -> np.ndarray:
     m, n = a.sum(1), b.sum(1)
     diag = np.diag(kernel)
     ka, kb = a @ kernel, b @ kernel
+    if np.any(m < 2) or np.any(n < 2):
+        raise ValueError("unbiased MMD² needs >=2 units in each group")
     xx = ((ka * a).sum(1) - a @ diag) / (m * (m - 1))
     yy = ((kb * b).sum(1) - b @ diag) / (n * (n - 1))
     xy = (ka * b).sum(1) / (m * n)

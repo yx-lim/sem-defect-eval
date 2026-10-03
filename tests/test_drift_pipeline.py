@@ -158,3 +158,12 @@ def test_negative_control_split_count_and_rates():
     assert neg["n_splits"] == 35
     assert all(0 <= v <= 1 for v in neg["false_flag_rate"].values())
     assert neg["false_flag_rate"]["flag_different"] == 0.0
+
+
+def test_tile_mmd_keeps_groups_apart_when_stem_names_repeat():
+    ref = _stem_table(7, "Batch_1", seed=1)
+    copy = ref.assign(batch="shifted")
+    multi = analysis.multivariate(ref, copy, _tiles_from(ref), _tiles_from(copy), 499, 0, 95.0)
+    for res in multi["tile_mmd"].values():
+        assert res["n_tiles"] == 2 * len(_tiles_from(ref))
+        assert np.isfinite(res["mmd2"]) and res["p"] > 0.5

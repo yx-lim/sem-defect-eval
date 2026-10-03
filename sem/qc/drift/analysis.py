@@ -66,13 +66,15 @@ def multivariate(
             ref[cols].to_numpy(float), inc[cols].to_numpy(float), n_perm, seed
         )
         if ref_tiles is not None and inc_tiles is not None:
-            tiles = pd.concat([ref_tiles, inc_tiles], ignore_index=True)
-            stems = list(ref["stem"]) + list(inc["stem"])
-            index = {s: i for i, s in enumerate(stems)}
-            tiles = tiles[tiles["stem"].isin(index)]
+            # Keyed by group as well as stem: positive-control copies reuse reference stem names.
+            ref_index = {s: i for i, s in enumerate(ref["stem"])}
+            inc_index = {s: len(ref) + i for i, s in enumerate(inc["stem"])}
+            rt = ref_tiles[ref_tiles["stem"].isin(ref_index)]
+            it = inc_tiles[inc_tiles["stem"].isin(inc_index)]
             out["tile_mmd"][set_name] = stats.tile_mmd_block_test(
-                tiles[cols].to_numpy(float),
-                tiles["stem"].map(index).to_numpy(int),
+                np.vstack([rt[cols].to_numpy(float), it[cols].to_numpy(float)]),
+                np.concatenate([rt["stem"].map(ref_index).to_numpy(int),
+                                it["stem"].map(inc_index).to_numpy(int)]),
                 np.array([False] * len(ref) + [True] * len(inc)),
                 n_perm, seed,
             )
