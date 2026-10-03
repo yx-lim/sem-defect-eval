@@ -75,6 +75,8 @@ review:
   dedup_iou: 0.5
   candidate_min_context_px: 128
   candidate_max_tile_px: 1024
+  cc_min_area_px: {pore: 64, bright_particle: 64, crack_intraparticle: 40, interparticle_gap: 40}
+  blank_start_tiles: 0
   context_scale: 3.0
   context_max_px: 512
   vlm:

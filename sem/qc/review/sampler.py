@@ -12,9 +12,11 @@ from typing import Any, Iterable
 
 import numpy as np
 from PIL import Image
+from scipy import ndimage as ndi
 from skimage.draw import polygon as draw_polygon
+from skimage.measure import approximate_polygon, find_contours
 
-from sem.qc.schema import IGNORE_LABEL, make_item_id, write_jsonl
+from sem.qc.schema import CLASS_IDS, IGNORE_LABEL, make_item_id, write_jsonl
 from sem.qc.split import load_manifest as _frozen_load_manifest
 
 
@@ -255,6 +257,73 @@ def _instance_uncertainty(
     return float(region[mask].mean())
 
 
+def _cc_polygon(mask_crop: np.ndarray, x0: int, y0: int) -> list[list[float]]:
+    """Longest outer contour of a component crop, as full-res [x, y] floats."""
+    padded = np.pad(mask_crop.astype(float), 1)
+    contours = find_contours(padded, 0.5)
+    if contours:
+        contour = max(contours, key=len)
+        approx = approximate_polygon(contour, tolerance=0.5)
+        points = [
+            [float(col) - 1 + x0, float(row) - 1 + y0]
+            for row, col in approx
+        ]
+        if len(points) >= 3:
+            return points
+    h, w = mask_crop.shape
+    return [[x0, y0], [x0 + w, y0], [x0 + w, y0 + h], [x0, y0 + h]]
+
+
+def _semantic_cc_instances(
+    semantic: np.ndarray,
+    u_map: np.ndarray | None,
+    method: str,
+    stem: str,
+    cc_min_area: dict[str, int],
+) -> list[dict[str, Any]]:
+    """Connected-component candidate records from a semantic prediction map."""
+    records = []
+    structure = np.ones((3, 3))
+    for class_name in sorted(cc_min_area):
+        min_area = int(cc_min_area[class_name])
+        class_id = CLASS_IDS[class_name]
+        labels, n_labels = ndi.label(semantic == class_id, structure=structure)
+        if n_labels == 0:
+            continue
+        counts = np.bincount(labels.ravel(), minlength=n_labels + 1)
+        kept = np.nonzero(counts >= min_area)[0]
+        kept = kept[kept > 0]
+        sums = None
+        if u_map is not None:
+            sums = np.bincount(
+                labels.ravel(), weights=u_map.ravel(), minlength=n_labels + 1
+            )
+        slices = ndi.find_objects(labels)
+        for label_id in kept:
+            sl = slices[label_id - 1]
+            area = int(counts[label_id])
+            mean_u = (
+                float(sums[label_id] / area) if sums is not None else None
+            )
+            x0, x1 = int(sl[1].start), int(sl[1].stop)
+            y0, y1 = int(sl[0].start), int(sl[0].stop)
+            records.append(
+                {
+                    "class_name": class_name,
+                    "subtype": None,
+                    "score": None,
+                    "source": f"{method}:semantic_cc",
+                    "method": method,
+                    "stem": stem,
+                    "bbox": [x0, y0, x1, y1],
+                    "polygon": _cc_polygon(labels[sl] == label_id, x0, y0),
+                    "area_px": area,
+                    "uncertainty": mean_u,
+                }
+            )
+    return records
+
+
 def _candidate_tile(
     instance: dict[str, Any],
     height: int,
@@ -486,11 +555,32 @@ def build_review_set(
                     continue
                 record = dict(inst)
                 record["source"] = method
+                record["method"] = method
                 record["stem"] = stem
                 pool.append(record)
-    pool_size_before = len(pool)
 
     stem_sizes = {stem: _stem_size(manifest[stem]) for stem in used_stems}
+
+    # semantic connected-component candidates from every method's semantic map
+    cc_min_area = review_config.get("cc_min_area_px") or {}
+    if cc_min_area:
+        for method in methods:
+            for stem in used_stems:
+                cc_semantic = (
+                    semantics[stem]
+                    if method == prefill
+                    else _load_semantic(preds_root, method, stem)
+                )
+                if cc_semantic is None:
+                    continue
+                cc_u = _load_uncertainty(preds_root, method, stem)
+                pool.extend(
+                    _semantic_cc_instances(
+                        cc_semantic, cc_u, method, stem, cc_min_area
+                    )
+                )
+    pool_size_before = len(pool)
+
     for inst in pool:
         instances_by_stem[inst["stem"]].append(inst)
 
@@ -530,12 +620,14 @@ def build_review_set(
         inst["tile"] = tile
         final_pool.append(inst)
 
-    # uncertainty per instance from its own method's map
+    # uncertainty per instance from its own method's map (skip already set)
     method_u: dict[tuple[str, str], np.ndarray | None] = {}
     for inst in final_pool:
-        key = (inst["source"], inst["stem"])
+        if "uncertainty" in inst:
+            continue
+        key = (inst["method"], inst["stem"])
         if key not in method_u:
-            method_u[key] = _load_uncertainty(preds_root, inst["source"], inst["stem"])
+            method_u[key] = _load_uncertainty(preds_root, inst["method"], inst["stem"])
         inst["uncertainty"] = _instance_uncertainty(inst, method_u[key])
 
     # ---- candidates: random allocation ----------------------------------
@@ -605,13 +697,56 @@ def build_review_set(
         inst for inst in final_pool if inst["item_id"] not in chosen_candidates
     ]
     n_unc_wanted = n_unc_candidates + (n_random_candidates - n_random_used)
-    remaining_pool.sort(key=lambda i: (-float(i["uncertainty"]), i["item_id"]))
-    for inst in remaining_pool[: max(0, n_unc_wanted)]:
-        stratum = f"{inst['class_name']}|{inst['source']}"
-        chosen_candidates[inst["item_id"]] = {
-            "inst": inst,
-            "sampling": {"stratum": stratum, "method": "uncertainty", "weight": None},
-        }
+    # round-robin by class: each round, every class takes its most-uncertain
+    # remaining item (items with uncertainty None are never picked)
+    remaining_by_class: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for inst in remaining_pool:
+        if inst.get("uncertainty") is not None:
+            remaining_by_class[inst["class_name"]].append(inst)
+    for entries in remaining_by_class.values():
+        entries.sort(key=lambda i: (-float(i["uncertainty"]), i["item_id"]))
+    unc_index = {cls: 0 for cls in remaining_by_class}
+    n_unc_used_cand = 0
+    while n_unc_used_cand < n_unc_wanted:
+        progressed = False
+        for cls in sorted(remaining_by_class):
+            if n_unc_used_cand >= n_unc_wanted:
+                break
+            idx = unc_index[cls]
+            if idx >= len(remaining_by_class[cls]):
+                continue
+            inst = remaining_by_class[cls][idx]
+            unc_index[cls] += 1
+            stratum = f"{inst['class_name']}|{inst['source']}"
+            chosen_candidates[inst["item_id"]] = {
+                "inst": inst,
+                "sampling": {
+                    "stratum": stratum,
+                    "method": "uncertainty",
+                    "weight": None,
+                },
+            }
+            n_unc_used_cand += 1
+            progressed = True
+        if not progressed:
+            break
+
+    # ---- blank-start anchoring control ------------------------------------
+    n_blank = int(review_config.get("blank_start_tiles", 0))
+    random_tile_ids = sorted(
+        item_id
+        for item_id, t in chosen_tiles.items()
+        if t["sampling"]["method"] == "random"
+    )
+    blank_ids: set[str] = set()
+    if n_blank > 0 and random_tile_ids:
+        rng = _stratum_rng(seed, "blank_start")
+        picks = rng.choice(
+            len(random_tile_ids),
+            size=min(n_blank, len(random_tile_ids)),
+            replace=False,
+        )
+        blank_ids = {random_tile_ids[int(i)] for i in picks}
 
     # ---- assemble items --------------------------------------------------
     items: list[dict[str, Any]] = []
@@ -621,6 +756,7 @@ def build_review_set(
         crop = semantics[stem][y0 : y0 + tile_px, x0 : x0 + tile_px]
         rel = Path("prefill") / f"{item_id}.png"
         Image.fromarray(crop, mode="L").save(out_dir / rel)
+        is_blank = item_id in blank_ids
         u_map = uncertainties[stem]
         if u_map is not None:
             window_u = u_map[y0 : y0 + tile_px, x0 : x0 + tile_px]
@@ -645,15 +781,17 @@ def build_review_set(
                 "kind": "exhaustive_tile",
                 "tile": {"x0": x0, "y0": y0, "w": tile_px, "h": tile_px},
                 "sampling": tile["sampling"],
+                "prefill": "blank" if is_blank else prefill,
                 "proposal": {
                     "source": prefill,
                     "class_name": None,
                     "subtype": None,
                     "polygon": None,
-                    "semantic_png": str(rel),
+                    "semantic_png": None if is_blank else str(rel),
+                    "reference_semantic_png": str(rel) if is_blank else None,
                     "score": None,
                     "uncertainty": mean_u,
-                    "instances": insts,
+                    "instances": [] if is_blank else insts,
                 },
                 "vlm_suggestion": None,
                 "human": None,
@@ -682,6 +820,8 @@ def build_review_set(
                     "score": inst.get("score"),
                     "uncertainty": inst["uncertainty"],
                     "duplicates": inst.get("duplicates", []),
+                    "method": inst.get("method"),
+                    "area_px": inst.get("area_px"),
                 },
                 "vlm_suggestion": None,
                 "human": None,
@@ -728,6 +868,9 @@ def build_review_set(
     per_method = {m: 0 for m in methods}
     for inst in final_pool:
         per_method[inst["source"]] = per_method.get(inst["source"], 0) + 1
+    pool_per_source: dict[str, int] = defaultdict(int)
+    for inst in final_pool:
+        pool_per_source[inst["source"]] += 1
 
     summary = {
         "seed": seed,
@@ -750,6 +893,7 @@ def build_review_set(
             "per_class": per_class,
             "per_method": per_method,
             "id_collisions": id_collisions,
+            "pool_per_source": dict(pool_per_source),
             "n_random_requested": n_random_candidates,
             "n_uncertainty_requested": n_unc_candidates,
             "shortfall": max(0, n_candidates - len(chosen_candidates)),
@@ -762,4 +906,107 @@ def build_review_set(
     summary_path.write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    _write_counts_md(out_dir / "counts.md", items, summary)
     return {"items": items, "summary": summary}
+
+
+def _write_counts_md(
+    path: Path, items: list[dict[str, Any]], summary: dict[str, Any]
+) -> None:
+    """Deterministic markdown tables describing the review set."""
+    lines = [
+        "# Review set counts",
+        "",
+        f"Total items: {len(items)}",
+        "",
+        "## Per stem x kind x sampling method",
+        "",
+        "| stem | split | kind | method | n |",
+        "|---|---|---|---|---|",
+    ]
+    counts: dict[tuple[str, str, str], int] = defaultdict(int)
+    meta: dict[str, str] = {}
+    for item in items:
+        counts[(item["stem"], item["kind"], item["sampling"]["method"])] += 1
+        meta[item["stem"]] = item["split"]
+    for (stem, kind, method), n in sorted(counts.items()):
+        lines.append(f"| {stem} | {meta[stem]} | {kind} | {method} | {n} |")
+
+    lines += [
+        "",
+        "## Per class x source x sampling method (candidates)",
+        "",
+        "| class | source | random | uncertainty | pool |",
+        "|---|---|---|---|---|",
+    ]
+    cand = summary["candidates"]
+    strata = cand["strata"]
+    picked: dict[tuple[str, str, str], int] = defaultdict(int)
+    for item in items:
+        if item["kind"] == "candidate":
+            key = (
+                item["proposal"]["class_name"],
+                item["proposal"]["source"],
+                item["sampling"]["method"],
+            )
+            picked[key] += 1
+    for stratum in sorted(strata):
+        class_name, source = stratum.split("|", 1)
+        lines.append(
+            f"| {class_name} | {source} "
+            f"| {picked.get((class_name, source, 'random'), 0)} "
+            f"| {picked.get((class_name, source, 'uncertainty'), 0)} "
+            f"| {strata[stratum]['population']} |"
+        )
+    for class_name in sorted(cand["per_class"]):
+        if not any(
+            s.split("|", 1)[0] == class_name for s in strata
+        ):
+            lines.append(f"| {class_name} | — | 0 | 0 | 0 |")
+
+    lines += [
+        "",
+        "## Per stratum",
+        "",
+        "| stratum | population | n_random | weight |",
+        "|---|---|---|---|",
+    ]
+    for stratum, stats in sorted(summary["exhaustive"]["strata"].items()):
+        lines.append(
+            f"| {stratum} (exhaustive) | {stats['population']} "
+            f"| {stats['n_random']} | — |"
+        )
+    for stratum, stats in sorted(strata.items()):
+        lines.append(
+            f"| {stratum} | {stats['population']} "
+            f"| {stats['n_random']} | {stats['weight']} |"
+        )
+
+    lines += ["", "## Shortfalls", ""]
+    for class_name, stats in sorted(cand["per_class"].items()):
+        if stats["shortfall_vs_min"]:
+            lines.append(
+                f"- {class_name}: pool {stats['pool']} "
+                f"(shortfall {stats['shortfall_vs_min']})"
+            )
+    if cand["shortfall"]:
+        lines.append(f"- total candidates shortfall: {cand['shortfall']}")
+
+    lines += [
+        "",
+        "## Pools",
+        "",
+        f"- pool_before_dedup: {cand['pool_before_dedup']}",
+        f"- pool_after_dedup: {cand['pool_after_dedup']}",
+        f"- pool_final: {cand['pool_final']}",
+        f"- duplicates_merged: {cand['duplicates_merged']}",
+        f"- id_collisions: {cand['id_collisions']}",
+    ]
+    prefill_counts: dict[str, int] = defaultdict(int)
+    for item in items:
+        if item["kind"] == "exhaustive_tile":
+            prefill_counts[item.get("prefill") or "classical_v1"] += 1
+    lines += ["", "## Prefill mode (exhaustive tiles)", ""]
+    for mode in sorted(prefill_counts):
+        lines.append(f"- {mode}: {prefill_counts[mode]}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
